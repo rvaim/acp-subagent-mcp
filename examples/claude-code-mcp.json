@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "acp-subagent": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "acp-subagent-mcp"],
+      "env": {
+        "ACP_SUBAGENT_ALLOWED_ROOTS": "${PWD}",
+        "ACP_SUBAGENT_DEFAULT_AGENT": "claude",
+        "ACP_SUBAGENT_SKILL_MODE": "list"
+      }
+    }
+  }
+}

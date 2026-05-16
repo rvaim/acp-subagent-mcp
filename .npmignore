@@ -1,0 +1,11 @@
+node_modules/
+.subagent-runs/
+.subagent-worktrees/
+.env
+*.log
+src/
+test/
+tsconfig.json
+package-lock.json
+*.zip
+*.tgz

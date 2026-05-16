@@ -1,0 +1,56 @@
+{
+  "name": "acp-subagent-mcp",
+  "version": "0.3.2",
+  "private": false,
+  "type": "module",
+  "description": "通用 ACP 子代理 MCP Server：通过 MCP 工具调度、编排和管理支持 ACP 的子代理。",
+  "bin": {
+    "acp-subagent-mcp": "dist/src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/src/index.js",
+    "mock-agent": "tsx test/fixtures/mock-acp-agent.ts",
+    "smoke": "npm run build && node test/smoke.mjs",
+    "print-default-config": "npm run build && node dist/src/index.js --print-default-config",
+    "print-claude-desktop-config": "npm run build && node dist/src/index.js --print-claude-desktop-config",
+    "prepublishOnly": "npm run check && npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "acp",
+    "agent-client-protocol",
+    "subagent",
+    "agent-skills",
+    "acp-client"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/",
+    "examples/",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.21.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "smol-toml": "^1.4.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

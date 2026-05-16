@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "acp-subagent": {
+      "command": "npx",
+      "args": ["-y", "acp-subagent-mcp"],
+      "env": {
+        "ACP_SUBAGENT_ALLOWED_ROOTS": "/Users/you/projects",
+        "ACP_SUBAGENT_DEFAULT_AGENT": "claude",
+        "ACP_SUBAGENT_CLAUDE_COMMAND": "claude-agent-acp",
+        "ACP_SUBAGENT_SKILL_MODE": "list"
+      }
+    }
+  }
+}
