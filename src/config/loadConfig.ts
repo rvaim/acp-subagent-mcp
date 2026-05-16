@@ -38,7 +38,7 @@ const defaultDefaults: DefaultsConfig = {
   max_depth: 2,
   max_prompt_chars: 120000,
   max_inline_file_chars: 30000,
-  log_dir: ".subagent-runs",
+  log_dir: ".subagents/runs",
   session_ttl_secs: 1800,
   completed_session_ttl_secs: 600,
   max_active_sessions: 4,
@@ -48,7 +48,8 @@ const defaultDefaults: DefaultsConfig = {
 
 /** 默认安全配置。 */
 const defaultSecurity: SecurityConfig = {
-  allowed_cwd_roots: [process.cwd()],
+  allowed_cwd_roots: [],
+  auto_workspace_roots: true,
   allow_network: false,
   max_read_file_bytes: 1024 * 1024,
   require_absolute_agent_command: false
@@ -63,7 +64,7 @@ const defaultConcurrency: ConcurrencyConfig = {
 /** 默认 worktree 配置。 */
 const defaultWorktree: WorktreeConfig = {
   enabled: false,
-  base_dir: ".subagent-worktrees",
+  base_dir: ".subagents/worktrees",
   keep_on_failure: true,
   keep_on_success: false,
   max_patch_bytes: 2_000_000,
@@ -109,6 +110,12 @@ const envValueSchema = z.union([
   z.object({ from_env: z.string().min(1) }).strict()
 ]);
 
+/** agent 环境变量继承策略校验。旧值会被归一到新语义，便于未升级的本地配置继续工作。 */
+const agentEnvPolicySchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  return normalizeAgentEnvPolicyValue(value) ?? value;
+}, z.enum(["all", "allowlist", "none"]));
+
 /** 权限策略校验。 */
 const permissionPolicySchema = z.object({
   read: z.enum(["allow", "deny", "ask"]).default(defaultPermissionPolicy.read),
@@ -125,6 +132,8 @@ const agentConfigSchema: z.ZodType<AgentConfig> = z.object({
   args: z.array(z.string()).default([]),
   capabilities: z.array(z.string()).default([]),
   system_prompt: z.string().optional(),
+  env_policy: agentEnvPolicySchema.default("all"),
+  env_allowlist: z.array(z.string()).default([]),
   env: z.record(z.string(), envValueSchema).default({}),
   install_hint: z.string().optional()
 }).strict();
@@ -158,6 +167,7 @@ const appConfigSchema = z.object({
   }).default(defaultDefaults),
   security: z.object({
     allowed_cwd_roots: z.array(z.string()).default(defaultSecurity.allowed_cwd_roots),
+    auto_workspace_roots: z.boolean().default(defaultSecurity.auto_workspace_roots),
     allow_network: z.boolean().default(defaultSecurity.allow_network),
     max_read_file_bytes: z.number().int().positive().default(defaultSecurity.max_read_file_bytes),
     require_absolute_agent_command: z.boolean().default(defaultSecurity.require_absolute_agent_command)
@@ -246,11 +256,11 @@ export async function loadConfig(configSource?: string | ResolvedConfigSource): 
     claude: defaultClaudePermissionPolicy,
     ...parsed.permissions
   };
-  const agents: Record<string, AgentConfig> = {
+  const agents = normalizeAgentConfigs({
     ...defaultAgents,
     ...(parsed.agents as Record<string, AgentConfig>),
     ...envAgents
-  };
+  });
   const mcpServers: Record<string, McpServerProfile> = {
     ...(parsed.mcp_servers as Record<string, McpServerProfile>),
     ...envMcpServers
@@ -322,17 +332,44 @@ function buildDefaultAgentsFromEnv(): Record<string, AgentConfig> {
       args,
       capabilities: ["claude", "code", "review", "analysis", "edit"],
       system_prompt: "你是一个被父代理调用的 Claude 子代理。严格遵守任务边界，只返回最终结果，不输出隐藏推理。",
-      env: {
-        ANTHROPIC_API_KEY: { from_env: "ANTHROPIC_API_KEY" },
-        ANTHROPIC_AUTH_TOKEN: { from_env: "ANTHROPIC_AUTH_TOKEN" },
-        ANTHROPIC_BASE_URL: { from_env: "ANTHROPIC_BASE_URL" },
-        ANTHROPIC_MODEL: { from_env: "ANTHROPIC_MODEL" },
-        CLAUDE_CONFIG_DIR: { from_env: "CLAUDE_CONFIG_DIR" },
-        ...envFromJson
-      },
+      env_policy: parseAgentEnvPolicyEnv("ACP_SUBAGENT_CLAUDE_ENV_POLICY", parseAgentEnvPolicyEnv("ACP_SUBAGENT_ENV_POLICY", "all")),
+      env_allowlist: parseListEnv("ACP_SUBAGENT_CLAUDE_ENV_ALLOWLIST", parseListEnv("ACP_SUBAGENT_ENV_ALLOWLIST", [])),
+      env: envFromJson,
       install_hint: "未找到默认 Claude ACP 子代理命令。请确认 claude-agent-acp 已在 PATH 中；或在 Claude Desktop 的 env 中设置 ACP_SUBAGENT_CLAUDE_COMMAND 为可执行文件绝对路径；或创建 agents.toml 自定义 [agents.claude]。本包不会自动安装具体子代理 adapter。"
     }
   };
+}
+
+/**
+ * 归一化所有 agent 的环境变量继承配置。
+ *
+ * 这样通过 ACP_SUBAGENT_AGENTS_JSON 增加的 agent 也会获得默认 all 策略，
+ * 同时支持全局 ACP_SUBAGENT_ENV_POLICY 和按 agent 名称覆盖。
+ */
+function normalizeAgentConfigs(agents: Record<string, AgentConfig>): Record<string, AgentConfig> {
+  const globalPolicy = normalizeAgentEnvPolicyValue(process.env.ACP_SUBAGENT_ENV_POLICY?.trim());
+  const globalAllowlist = parseOptionalListEnv("ACP_SUBAGENT_ENV_ALLOWLIST");
+  const normalized: Record<string, AgentConfig> = {};
+
+  for (const [name, agent] of Object.entries(agents)) {
+    const envPrefix = `ACP_SUBAGENT_${toEnvNameFragment(name)}_`;
+    const agentPolicy = normalizeAgentEnvPolicyValue(process.env[`${envPrefix}ENV_POLICY`]?.trim());
+    const agentAllowlist = parseOptionalListEnv(`${envPrefix}ENV_ALLOWLIST`);
+    normalized[name] = {
+      ...agent,
+      env_policy: agentPolicy ?? globalPolicy ?? normalizeAgentEnvPolicyValue(agent.env_policy as string | undefined) ?? "all",
+      env_allowlist: agentAllowlist ?? globalAllowlist ?? agent.env_allowlist ?? []
+    };
+  }
+
+  return normalized;
+}
+
+/**
+ * 把 agent 名称转换为环境变量中安全的片段。
+ */
+function toEnvNameFragment(agentName: string): string {
+  return agentName.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 
 /**
@@ -353,10 +390,13 @@ function applyDefaultEnvOverrides(config: DefaultsConfig): DefaultsConfig {
  * 应用安全环境变量覆盖。
  */
 function applySecurityEnvOverrides(config: SecurityConfig): SecurityConfig {
-  const allowedRoots = parseListEnv("ACP_SUBAGENT_ALLOWED_ROOTS", config.allowed_cwd_roots);
+  const workspaceRoots = parseOptionalListEnv("ACP_SUBAGENT_WORKSPACE_ROOTS");
+  const configuredRoots = workspaceRoots ?? config.allowed_cwd_roots;
+
   return {
     ...config,
-    allowed_cwd_roots: allowedRoots.length > 0 ? allowedRoots : [process.cwd()],
+    allowed_cwd_roots: configuredRoots,
+    auto_workspace_roots: parseBooleanEnv("ACP_SUBAGENT_AUTO_WORKSPACE_ROOTS", config.auto_workspace_roots),
     allow_network: parseBooleanEnv("ACP_SUBAGENT_ALLOW_NETWORK", config.allow_network),
     require_absolute_agent_command: parseBooleanEnv("ACP_SUBAGENT_REQUIRE_ABSOLUTE_AGENT_COMMAND", config.require_absolute_agent_command)
   };
@@ -462,6 +502,37 @@ function parseListEnv(name: string, fallback: string[]): string[] {
 }
 
 /**
+ * 解析可选字符串列表环境变量。undefined 表示用户没有设置该环境变量。
+ */
+function parseOptionalListEnv(name: string): string[] | undefined {
+  if (!(name in process.env)) return undefined;
+  return parseListEnv(name, []);
+}
+
+/**
+ * 解析 agent 环境变量继承策略。
+ */
+function parseAgentEnvPolicyEnv(name: string, fallback: "all" | "allowlist" | "none"): "all" | "allowlist" | "none" {
+  const raw = process.env[name]?.trim();
+  return normalizeAgentEnvPolicyValue(raw) ?? fallback;
+}
+
+/**
+ * 归一化环境变量继承策略。
+ *
+ * 新配置只推荐 all / allowlist / none。旧值为了平滑升级继续接受：
+ * inherit -> all，auth -> allowlist，minimal -> none。
+ */
+function normalizeAgentEnvPolicyValue(raw: string | undefined): "all" | "allowlist" | "none" | undefined {
+  if (!raw) return undefined;
+  if (raw === "all" || raw === "allowlist" || raw === "none") return raw;
+  if (raw === "inherit") return "all";
+  if (raw === "auth") return "allowlist";
+  if (raw === "minimal") return "none";
+  return undefined;
+}
+
+/**
  * 解析 args 环境变量。优先支持 JSON array，其次做简单空白切分。
  */
 function parseArgsEnv(name: string, fallback: string[]): string[] {
@@ -499,23 +570,153 @@ function parseJsonObjectEnv<T extends Record<string, unknown>>(name: string, fal
  * 渲染一个可复制的默认 TOML 配置，用于高级用户落盘修改。
  */
 export function renderDefaultConfigToml(): string {
-  return `# acp-subagent-mcp 默认配置示例\n\n[defaults]\ndefault_agent = "claude"\ntimeout_secs = 600\ninactivity_timeout_secs = 120\nmax_depth = 2\nmax_prompt_chars = 120000\nmax_inline_file_chars = 30000\nlog_dir = ".subagent-runs"\nsession_ttl_secs = 1800\ncompleted_session_ttl_secs = 600\nmax_active_sessions = 4\nacp_cancel_grace_ms = 3000\nprocess_kill_grace_ms = 2000\n\n[security]\nallowed_cwd_roots = ["${escapeTomlString(process.cwd())}"]\nallow_network = false\nmax_read_file_bytes = 1048576\nrequire_absolute_agent_command = false\n\n[concurrency]\nmax_parallel_tasks = 4\ndefault_conflict_policy = "single_writer_per_cwd"\n\n[skills]\nenabled = true\ndefault_mode = "list"\ninclude_project_skills = true\ninclude_user_skills = true\ndiscovery_roots = []\ndefault_names = []\nmax_skills = 20\nmax_description_chars = 360\nmax_skill_chars = 8000\nmax_total_skill_chars = 20000\n\n[permissions.default]\nread = "allow"\nsearch = "allow"\nedit = "deny"\nexecute = "deny"\nnetwork = "deny"\n\n[permissions.claude]\nread = "allow"\nsearch = "allow"\nedit = "allow"\nexecute = "deny"\nnetwork = "deny"\n\n[agents.claude]\ndescription = "默认 Claude ACP 子代理。"\ncommand = "claude-agent-acp"\nargs = []\ncapabilities = ["claude", "code", "review", "analysis", "edit"]\ninstall_hint = "请确认 claude-agent-acp 已在 PATH，或用 ACP_SUBAGENT_CLAUDE_COMMAND 指定绝对路径。本包不会自动安装具体子代理 adapter。"\n\n[agents.claude.env]\nANTHROPIC_API_KEY = { from_env = "ANTHROPIC_API_KEY" }\nANTHROPIC_AUTH_TOKEN = { from_env = "ANTHROPIC_AUTH_TOKEN" }\nANTHROPIC_BASE_URL = { from_env = "ANTHROPIC_BASE_URL" }\nANTHROPIC_MODEL = { from_env = "ANTHROPIC_MODEL" }\nCLAUDE_CONFIG_DIR = { from_env = "CLAUDE_CONFIG_DIR" }\n`;
+  return `# acp-subagent-mcp 默认配置示例
+#
+# 普通用户不需要创建这个文件；直接通过 MCP Host / Claude Desktop 启动即可。
+# 只有需要严格限制工作区、增加子代理或覆盖命令时，才需要落盘配置。
+
+[defaults]
+default_agent = "claude"
+timeout_secs = 600
+inactivity_timeout_secs = 120
+max_depth = 2
+max_prompt_chars = 120000
+max_inline_file_chars = 30000
+log_dir = ".subagents/runs"
+session_ttl_secs = 1800
+completed_session_ttl_secs = 600
+max_active_sessions = 4
+acp_cancel_grace_ms = 3000
+process_kill_grace_ms = 2000
+
+[security]
+# 默认不需要设置 allowed_cwd_roots；MCP tool 传入的 cwd 会被视为当前工作区。
+# 如果你要做更严格的限制，再把下面这行改成固定目录列表。
+allowed_cwd_roots = []
+auto_workspace_roots = true
+allow_network = false
+max_read_file_bytes = 1048576
+require_absolute_agent_command = false
+
+[concurrency]
+max_parallel_tasks = 4
+default_conflict_policy = "single_writer_per_cwd"
+
+[skills]
+enabled = true
+default_mode = "list"
+include_project_skills = true
+include_user_skills = true
+discovery_roots = []
+default_names = []
+max_skills = 20
+max_description_chars = 360
+max_skill_chars = 8000
+max_total_skill_chars = 20000
+
+[permissions.default]
+read = "allow"
+search = "allow"
+edit = "deny"
+execute = "deny"
+network = "deny"
+
+[permissions.claude]
+read = "allow"
+search = "allow"
+edit = "allow"
+execute = "deny"
+network = "deny"
+
+[agents.claude]
+description = "默认 Claude ACP 子代理。"
+command = "claude-agent-acp"
+args = []
+capabilities = ["claude", "code", "review", "analysis", "edit"]
+env_policy = "all"
+# env_policy 可选：all | allowlist | none。默认 all，会继承 MCP Server 进程可见的全部环境变量。
+# env_allowlist 只在 env_policy="allowlist" 时生效，支持精确名称和 ANTHROPIC_* 这种前缀通配。
+env_allowlist = ["ANTHROPIC_*", "CLAUDE_*", "PATH", "HOME", "USERPROFILE"]
+install_hint = "请确认 claude-agent-acp 已在 PATH，或用 ACP_SUBAGENT_CLAUDE_COMMAND 指定绝对路径。本包不会自动安装具体子代理 adapter。"
+
+[agents.claude.env]
+# 这里是可选显式覆盖；默认 all 已经会继承宿主环境。未设置的 from_env 不会以空字符串传给子进程。
+# ANTHROPIC_API_KEY = { from_env = "ANTHROPIC_API_KEY" }
+`;
 }
 
 /**
  * 渲染 Claude Desktop 可直接复制的 MCP 配置片段。
  */
 export function renderClaudeDesktopConfigJson(): string {
-  const exampleRoot = process.env.ACP_SUBAGENT_ALLOWED_ROOTS || process.cwd();
   const config = {
     mcpServers: {
       "acp-subagent": {
         command: "npx",
         args: ["-y", "acp-subagent-mcp"],
         env: {
-          ACP_SUBAGENT_ALLOWED_ROOTS: exampleRoot,
           ACP_SUBAGENT_DEFAULT_AGENT: "claude",
           ACP_SUBAGENT_CLAUDE_COMMAND: "claude-agent-acp",
+          ACP_SUBAGENT_ENV_POLICY: "all",
+          ACP_SUBAGENT_SKILL_MODE: "list"
+        }
+      }
+    }
+  };
+  return `${JSON.stringify(config, null, 2)}\n`;
+}
+
+
+/**
+ * 渲染 Codex config.toml 可直接复制的 MCP 配置片段。
+ *
+ * Codex CLI 和 Codex IDE 扩展共用该配置格式。Codex Desktop 如果提供
+ * “Open config.toml” 或等价 MCP 设置入口，也可以使用同一段配置。
+ */
+export function renderCodexConfigToml(): string {
+  return `[mcp_servers.acp-subagent]
+command = "npx"
+args = ["-y", "acp-subagent-mcp"]
+# 可选：Codex 启动 stdio MCP server 时显式转发这些宿主环境变量。
+# 如果你的子代理依赖本地登录、代理、证书或 API key，请把对应变量列在这里。
+env_vars = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_MODEL",
+  "CLAUDE_CONFIG_DIR",
+  "OPENAI_API_KEY",
+  "CODEX_HOME",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY"
+]
+
+[mcp_servers.acp-subagent.env]
+ACP_SUBAGENT_DEFAULT_AGENT = "claude"
+ACP_SUBAGENT_CLAUDE_COMMAND = "claude-agent-acp"
+ACP_SUBAGENT_ENV_POLICY = "all"
+ACP_SUBAGENT_SKILL_MODE = "list"
+`;
+}
+
+/**
+ * 渲染通用 MCP Host 的 stdio JSON 配置片段。
+ */
+export function renderGenericMcpConfigJson(): string {
+  const config = {
+    mcpServers: {
+      "acp-subagent": {
+        type: "stdio",
+        command: "npx",
+        args: ["-y", "acp-subagent-mcp"],
+        env: {
+          ACP_SUBAGENT_DEFAULT_AGENT: "claude",
+          ACP_SUBAGENT_CLAUDE_COMMAND: "claude-agent-acp",
+          ACP_SUBAGENT_ENV_POLICY: "all",
           ACP_SUBAGENT_SKILL_MODE: "list"
         }
       }

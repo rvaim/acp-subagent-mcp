@@ -76,7 +76,7 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
 
   const taskId = options.taskId ?? `task_${randomUUID().slice(0, 12)}`;
   const agent = deps.config.agents[agentType];
-  const originalCwd = await resolveSafeCwd(normalizedInput.cwd, deps.config.security.allowed_cwd_roots);
+  const originalCwd = await resolveSafeCwd(normalizedInput.cwd, deps.config.security);
   const isWriter = taskRequiresWrite(normalizedInput);
   const conflictPolicy = options.conflictPolicy ?? normalizedInput.conflict_policy ?? deps.config.concurrency.default_conflict_policy;
   const releaseConcurrency = deps.concurrency.acquire({ config: deps.config, cwd: originalCwd, isWriter, conflictPolicy });

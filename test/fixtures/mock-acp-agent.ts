@@ -31,7 +31,7 @@ class MockAcpAgent implements acp.Agent {
         sessionCapabilities: { close: {} },
         loadSession: false
       },
-      agentInfo: { name: "mock-acp-agent", version: "0.3.2" },
+      agentInfo: { name: "mock-acp-agent", version: "0.1.0" },
       authMethods: []
     };
   }

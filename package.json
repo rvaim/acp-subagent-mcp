@@ -1,6 +1,6 @@
 {
   "name": "acp-subagent-mcp",
-  "version": "0.3.2",
+  "version": "0.1.0",
   "private": false,
   "type": "module",
   "description": "通用 ACP 子代理 MCP Server：通过 MCP 工具调度、编排和管理支持 ACP 的子代理。",
@@ -20,7 +20,9 @@
     "smoke": "npm run build && node test/smoke.mjs",
     "print-default-config": "npm run build && node dist/src/index.js --print-default-config",
     "print-claude-desktop-config": "npm run build && node dist/src/index.js --print-claude-desktop-config",
-    "prepublishOnly": "npm run check && npm run build"
+    "prepublishOnly": "npm run check && npm run build",
+    "print-codex-config": "npm run build && node dist/src/index.js --print-codex-config",
+    "print-generic-mcp-config": "npm run build && node dist/src/index.js --print-generic-mcp-config"
   },
   "keywords": [
     "mcp",

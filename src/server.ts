@@ -15,6 +15,7 @@ import { handleSubagentCancel } from "./tools/subagentCancel.js";
 import { handleSubagentClose } from "./tools/subagentClose.js";
 import { handleSubagentLogs } from "./tools/subagentLogs.js";
 import { handleSubagentSkills, subagentSkillsInputJsonSchema, subagentSkillsOutputJsonSchema } from "./tools/subagentSkills.js";
+import { getPackageVersion } from "./version.js";
 import { toMcpError, toMcpResult } from "./tools/mcpResult.js";
 import {
   genericToolOutputJsonSchema,
@@ -42,7 +43,7 @@ export async function startMcpServer(config: AppConfig): Promise<void> {
   const server = new Server(
     {
       name: "acp-subagent-mcp",
-      version: "0.3.0"
+      version: getPackageVersion()
     },
     {
       capabilities: {

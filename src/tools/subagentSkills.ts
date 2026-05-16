@@ -58,7 +58,7 @@ export const subagentSkillsOutputJsonSchema = {
  */
 export async function handleSubagentSkills(args: unknown, config: AppConfig): Promise<Record<string, unknown>> {
   const input = subagentSkillsInputSchema.parse(args);
-  const cwd = await resolveSafeCwd(input.cwd, config.security.allowed_cwd_roots);
+  const cwd = await resolveSafeCwd(input.cwd, config.security);
   const skills = await listVisibleSkills({
     config,
     cwd,

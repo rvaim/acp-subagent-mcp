@@ -24,7 +24,7 @@ inactivity_timeout_secs = 5
 max_depth = 2
 max_prompt_chars = 120000
 max_inline_file_chars = 30000
-log_dir = ".subagent-runs"
+log_dir = ".subagents/runs"
 session_ttl_secs = 60
 completed_session_ttl_secs = 10
 max_active_sessions = 4
@@ -52,7 +52,7 @@ file_mode = "0600"
 
 [worktree]
 enabled = false
-base_dir = ".subagent-worktrees"
+base_dir = ".subagents/worktrees"
 keep_on_failure = true
 keep_on_success = false
 max_patch_bytes = 2000000

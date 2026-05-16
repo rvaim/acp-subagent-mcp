@@ -86,7 +86,7 @@ export const subagentRunInputJsonSchema = {
   required: ["task"],
   properties: {
     agent_type: { type: "string", description: "可选；默认 claude 或环境变量指定的默认 agent" },
-    cwd: { type: "string", description: "绝对工作目录；必须位于 allowed_cwd_roots 内" },
+    cwd: { type: "string", description: "可选；绝对工作目录。默认当前工作区；高级场景可用 ACP_SUBAGENT_WORKSPACE_ROOTS 限制" },
     mode: { type: "string", enum: ["analyze", "review", "edit", "implement", "debug", "custom"], default: "analyze" },
     timeout_secs: { type: "integer", minimum: 1 },
     inactivity_timeout_secs: { type: "integer", minimum: 1 },

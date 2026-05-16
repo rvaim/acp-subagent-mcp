@@ -25,6 +25,15 @@ export interface PermissionPolicy {
 export type AgentEnvValue = string | { from_env: string };
 
 /**
+ * 子代理环境变量继承策略。
+ *
+ * all：继承 MCP Server 进程可见的所有环境变量，再叠加显式 env。
+ * allowlist：只继承 env_allowlist 命中的环境变量，再叠加显式 env。
+ * none：只传最小运行环境和显式 env。
+ */
+export type AgentEnvPolicy = "all" | "allowlist" | "none";
+
+/**
  * 单个 ACP agent 配置。
  */
 export interface AgentConfig {
@@ -38,7 +47,15 @@ export interface AgentConfig {
   capabilities: string[];
   /** 注入到子代理任务 prompt 的系统提示词。 */
   system_prompt?: string;
-  /** 传给子进程的白名单环境变量。 */
+  /** 子进程环境变量继承策略。默认 all，保证子代理可以复用用户已有 CLI 登录和配置。 */
+  env_policy?: AgentEnvPolicy;
+  /**
+   * allowlist 策略下允许继承的宿主环境变量。
+   *
+   * 支持精确变量名，例如 ANTHROPIC_API_KEY；也支持前缀通配，例如 ANTHROPIC_*。
+   */
+  env_allowlist?: string[];
+  /** 传给子进程的显式环境变量；未设置的 from_env 不会写入子进程环境。 */
   env?: Record<string, AgentEnvValue>;
   /** 当命令不存在或启动失败时给用户看的安装提示。 */
   install_hint?: string;
@@ -78,8 +95,12 @@ export interface DefaultsConfig {
  * 安全配置。
  */
 export interface SecurityConfig {
-  /** 允许作为 cwd 的根目录。 */
+  /**
+   * 严格工作区根目录列表。为空且 auto_workspace_roots=true 时，默认信任本次 tool 输入的 cwd 作为工作区。
+   */
   allowed_cwd_roots: string[];
+  /** 是否在未配置严格根目录时，自动把本次 cwd 视为当前工作区根目录。 */
+  auto_workspace_roots: boolean;
   /** 策略声明：是否允许网络。本项目不提供 OS 级网络隔离。 */
   allow_network: boolean;
   /** ACP fs/read_text_file 单次最大读取字节数。 */

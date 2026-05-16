@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { loadConfig, renderClaudeDesktopConfigJson, renderDefaultConfigToml, resolveConfigSourceFromArgs } from "./config/loadConfig.js";
+import { loadConfig, renderClaudeDesktopConfigJson, renderCodexConfigToml, renderDefaultConfigToml, renderGenericMcpConfigJson, resolveConfigSourceFromArgs } from "./config/loadConfig.js";
 import { startMcpServer } from "./server.js";
 
 /**
@@ -17,12 +17,16 @@ async function main(): Promise<void> {
       "  acp-subagent-mcp                       # 使用默认配置启动 MCP Server",
       "  acp-subagent-mcp --config agents.toml  # 使用高级配置文件",
       "  acp-subagent-mcp --print-claude-desktop-config",
+      "  acp-subagent-mcp --print-codex-config",
+      "  acp-subagent-mcp --print-generic-mcp-config",
       "  acp-subagent-mcp --print-default-config",
       "",
       "常用环境变量：",
-      "  ACP_SUBAGENT_ALLOWED_ROOTS=/path/a,/path/b",
       "  ACP_SUBAGENT_CLAUDE_COMMAND=claude-agent-acp",
       "  ACP_SUBAGENT_DEFAULT_AGENT=claude",
+      "  ACP_SUBAGENT_ENV_POLICY=all          # all | allowlist | none，默认 all",
+      "  ACP_SUBAGENT_ENV_ALLOWLIST=ANTHROPIC_*,PATH,HOME  # policy=allowlist 时使用",
+      "  ACP_SUBAGENT_WORKSPACE_ROOTS=/path/a,/path/b       # 可选；生产环境严格限制工作区",
       ""
     ].join("\n"));
     return;
@@ -35,6 +39,16 @@ async function main(): Promise<void> {
 
   if (argv.includes("--print-claude-desktop-config")) {
     process.stdout.write(renderClaudeDesktopConfigJson());
+    return;
+  }
+
+  if (argv.includes("--print-codex-config")) {
+    process.stdout.write(renderCodexConfigToml());
+    return;
+  }
+
+  if (argv.includes("--print-generic-mcp-config")) {
+    process.stdout.write(renderGenericMcpConfigJson());
     return;
   }
 

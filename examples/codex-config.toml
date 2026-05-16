@@ -1,0 +1,29 @@
+# Codex CLI / Codex IDE Extension / 支持同一 config.toml 的 Codex Desktop 配置示例。
+# 默认位置：~/.codex/config.toml
+# 受信项目也可以放在：.codex/config.toml
+
+[mcp_servers.acp-subagent]
+command = "npx"
+args = ["-y", "acp-subagent-mcp"]
+# Codex 启动 stdio MCP server 时，只有列在 env_vars 里的宿主变量会被转发。
+env_vars = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_MODEL",
+  "CLAUDE_CONFIG_DIR",
+  "OPENAI_API_KEY",
+  "CODEX_HOME",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY"
+]
+
+[mcp_servers.acp-subagent.env]
+ACP_SUBAGENT_DEFAULT_AGENT = "claude"
+ACP_SUBAGENT_CLAUDE_COMMAND = "claude-agent-acp"
+ACP_SUBAGENT_ENV_POLICY = "all"
+ACP_SUBAGENT_SKILL_MODE = "list"

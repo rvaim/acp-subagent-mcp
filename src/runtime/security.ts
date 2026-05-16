@@ -1,6 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import type { AppConfig } from "../config/types.js";
+import type { AppConfig, SecurityConfig } from "../config/types.js";
 import type { ResolvedTaskFile, SubagentRunInput, SubagentTask, TaskFile } from "../task/types.js";
 import { SubagentRuntimeError } from "./errors.js";
 
@@ -27,29 +27,38 @@ export function assertDepthAllowed(maxDepth: number): number {
 
 /**
  * 校验并解析安全工作目录。
+ *
+ * 普通 npm 使用场景下，MCP Host 通常会把当前项目目录作为 cwd 传入 tool。
+ * 因此默认使用 auto_workspace_roots：没有显式配置严格根目录时，信任本次 cwd
+ * 作为当前工作区。高级用户可以通过 ACP_SUBAGENT_WORKSPACE_ROOTS 或
+ * agents.toml 的 allowed_cwd_roots 切换到严格白名单。
  */
-export async function resolveSafeCwd(cwd: string | undefined, allowedRoots: string[]): Promise<string> {
-  const candidate = path.resolve(cwd ?? process.cwd());
+export async function resolveSafeCwd(cwd: string | undefined, security: SecurityConfig): Promise<string> {
+  const candidate = path.resolve(cwd ?? inferDefaultWorkspaceCwd());
 
   if (!path.isAbsolute(candidate)) {
     throw new SubagentRuntimeError("unsafe_cwd", "cwd 必须是绝对路径");
-  }
-
-  if (allowedRoots.length === 0) {
-    throw new SubagentRuntimeError("unsafe_cwd", "未配置 allowed_cwd_roots，拒绝运行子代理");
   }
 
   const realCwd = await realpath(candidate).catch((error) => {
     throw new SubagentRuntimeError("unsafe_cwd", `cwd 不存在或不可访问：${candidate}`, { cause: error });
   });
 
+  if (security.allowed_cwd_roots.length === 0) {
+    if (security.auto_workspace_roots) return realCwd;
+    throw new SubagentRuntimeError(
+      "unsafe_cwd",
+      "未配置工作区根目录。请传入 cwd，或设置 ACP_SUBAGENT_WORKSPACE_ROOTS；也可以开启 ACP_SUBAGENT_AUTO_WORKSPACE_ROOTS=1。"
+    );
+  }
+
   const realRoots = await Promise.all(
-    allowedRoots.map(async (root) => realpath(path.resolve(root)).catch(() => path.resolve(root)))
+    security.allowed_cwd_roots.map(async (root) => realpath(path.resolve(root)).catch(() => path.resolve(root)))
   );
 
   const allowed = realRoots.some((root) => isInsideOrEqual(root, realCwd));
   if (!allowed) {
-    throw new SubagentRuntimeError("unsafe_cwd", `cwd 不在 allowed_cwd_roots 内：${realCwd}`);
+    throw new SubagentRuntimeError("unsafe_cwd", `cwd 不在配置的工作区根目录内：${realCwd}`);
   }
 
   return realCwd;
@@ -139,6 +148,19 @@ export function rejectDynamicMcpServers(rawInput: unknown): void {
       "MVP 禁止通过 tool input 传动态 mcp_servers，请改用 mcp_server_profiles"
     );
   }
+}
+
+/**
+ * 推断默认工作区。
+ *
+ * Claude Code、npm、shell 可能分别提供 CLAUDE_PROJECT_DIR、INIT_CWD、PWD。
+ * 如果都没有，则退回 MCP Server 进程当前目录。
+ */
+function inferDefaultWorkspaceCwd(): string {
+  return process.env.CLAUDE_PROJECT_DIR
+    || process.env.INIT_CWD
+    || process.env.PWD
+    || process.cwd();
 }
 
 /**

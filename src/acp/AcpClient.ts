@@ -11,6 +11,7 @@ import type { RunLogger } from "../runtime/logs.js";
 import { terminateProcessTree } from "../runtime/processManager.js";
 import type { AcpContentBlock, AcpInitializeResult, AcpNewSessionResult, AcpPromptResult } from "./types.js";
 import { AcpEventAggregator } from "./eventAggregator.js";
+import { getPackageVersion } from "../version.js";
 
 /**
  * ACP Client 配置。
@@ -222,7 +223,7 @@ export class GenericAcpClient {
       clientInfo: {
         name: "acp-subagent-mcp",
         title: "ACP Subagent MCP Server",
-        version: "0.3.2"
+        version: getPackageVersion()
       }
     }).catch((error) => {
       throw new SubagentRuntimeError("acp_initialize_failed", `ACP initialize 失败：${(error as Error).message}`, { cause: error });

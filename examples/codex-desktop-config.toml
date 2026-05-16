@@ -1,0 +1,28 @@
+# Codex Desktop / Codex IDE Extension 配置示例。
+# 官方文档明确 Codex CLI 与 Codex IDE Extension 共用 config.toml。
+# 如果你的 Codex Desktop 版本提供 MCP settings / Open config.toml，也可使用同一段配置。
+
+[mcp_servers.acp-subagent]
+command = "npx"
+args = ["-y", "acp-subagent-mcp"]
+env_vars = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_MODEL",
+  "CLAUDE_CONFIG_DIR",
+  "OPENAI_API_KEY",
+  "CODEX_HOME",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY"
+]
+
+[mcp_servers.acp-subagent.env]
+ACP_SUBAGENT_DEFAULT_AGENT = "claude"
+ACP_SUBAGENT_CLAUDE_COMMAND = "claude-agent-acp"
+ACP_SUBAGENT_ENV_POLICY = "all"
+ACP_SUBAGENT_SKILL_MODE = "list"
