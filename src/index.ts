@@ -22,7 +22,7 @@ async function main(): Promise<void> {
       "  acp-subagent-mcp --print-default-config",
       "",
       "常用环境变量：",
-      "  ACP_SUBAGENT_CLAUDE_COMMAND=claude-agent-acp",
+      "  ACP_SUBAGENT_DEFAULT_AGENT_COMMAND=claude-agent-acp",
       "  ACP_SUBAGENT_DEFAULT_AGENT=claude",
       "  ACP_SUBAGENT_ENV_POLICY=all          # all | allowlist | none，默认 all",
       "  ACP_SUBAGENT_ENV_ALLOWLIST=ANTHROPIC_*,PATH,HOME  # policy=allowlist 时使用",

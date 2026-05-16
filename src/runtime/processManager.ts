@@ -269,9 +269,9 @@ function buildMissingCommandMessage(command: string, args: string[]): string {
   const configured = [command, ...args].join(" ");
   if (command === "claude-agent-acp") {
     return [
-      "未找到默认 Claude ACP 子代理命令：claude-agent-acp。",
+      "未找到默认 默认 ACP 子代理命令：claude-agent-acp。",
       "请确认 claude-agent-acp 已位于 PATH 中。本 MCP 包不会自动安装或捆绑任何具体子代理 adapter。",
-      "也可以设置环境变量 ACP_SUBAGENT_CLAUDE_COMMAND=/absolute/path/to/claude-agent-acp，或创建 agents.toml 自定义 [agents.claude]。",
+      "也可以设置环境变量 ACP_SUBAGENT_DEFAULT_AGENT_COMMAND=/absolute/path/to/claude-agent-acp，或创建 agents.toml 自定义默认 agent。",
       `当前配置命令：${configured}`
     ].join(" ");
   }

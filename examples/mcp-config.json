@@ -9,7 +9,6 @@
       ],
       "env": {
         "ACP_SUBAGENT_DEFAULT_AGENT": "claude",
-        "ACP_SUBAGENT_CLAUDE_COMMAND": "claude-agent-acp",
         "ACP_SUBAGENT_ENV_POLICY": "all",
         "ACP_SUBAGENT_SKILL_MODE": "list"
       }

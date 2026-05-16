@@ -85,7 +85,7 @@ system_prompt = """
 严格遵守任务边界，只返回最终结果，不输出隐藏推理。
 如果 prompt 中提供了父代理 Skill 清单，请优先遵守相关项目约定。
 """
-install_hint = "请确认 claude-agent-acp 已在 PATH，或通过 ACP_SUBAGENT_CLAUDE_COMMAND 指定绝对路径。本 MCP 包不会自动安装具体子代理 adapter。"
+install_hint = "请确认 claude-agent-acp 已在 PATH，或通过 ACP_SUBAGENT_DEFAULT_AGENT_COMMAND 指定绝对路径。本 MCP 包不会自动安装具体子代理 adapter。"
 
 # 默认 env_policy="all" 已经继承宿主环境。只有需要显式覆盖时才添加 [agents.claude.env]。
 # [agents.claude.env]

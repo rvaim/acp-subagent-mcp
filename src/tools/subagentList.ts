@@ -43,7 +43,7 @@ export function handleSubagentList(config: AppConfig): SubagentListOutput {
       capabilities: agent.capabilities,
       default: name === config.defaults.default_agent || undefined,
       install_hint: name === "claude" && agent.command === "claude-agent-acp"
-        ? "如提示找不到 claude-agent-acp，请确认该命令已在 PATH，或设置 ACP_SUBAGENT_CLAUDE_COMMAND。本包不会自动安装具体子代理 adapter。"
+        ? "如提示找不到默认子代理命令，请确认该命令已在 PATH，或设置 ACP_SUBAGENT_DEFAULT_AGENT_COMMAND。本包不会自动安装具体子代理 adapter。"
         : undefined
     })),
     skills: {

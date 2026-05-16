@@ -318,33 +318,66 @@ export function resolveConfigPathFromArgs(argv: string[]): string {
 }
 
 /**
- * 构造默认 Claude 子代理配置。
+ * 构造默认子代理配置。
+ *
+ * 默认名称是 claude，但配置入口保持通用：
+ * - ACP_SUBAGENT_DEFAULT_AGENT 指定默认 agent 名称。
+ * - ACP_SUBAGENT_DEFAULT_AGENT_COMMAND 指定默认 agent 命令。
+ * - ACP_SUBAGENT_DEFAULT_AGENT_ARGS 指定默认 agent 参数。
  */
 function buildDefaultAgentsFromEnv(): Record<string, AgentConfig> {
-  const command = process.env.ACP_SUBAGENT_CLAUDE_COMMAND?.trim() || "claude-agent-acp";
-  const args = parseArgsEnv("ACP_SUBAGENT_CLAUDE_ARGS", []);
-  const envFromJson = parseJsonObjectEnv<Record<string, string | { from_env: string }>>("ACP_SUBAGENT_CLAUDE_ENV_JSON", {});
+  const defaultAgentName = process.env.ACP_SUBAGENT_DEFAULT_AGENT?.trim() || "claude";
+  const command = process.env.ACP_SUBAGENT_DEFAULT_AGENT_COMMAND?.trim() || inferDefaultAgentCommand(defaultAgentName);
+  const args = parseArgsEnv("ACP_SUBAGENT_DEFAULT_AGENT_ARGS", inferDefaultAgentArgs(defaultAgentName));
+  const envFromJson = parseJsonObjectEnv<Record<string, string | { from_env: string }>>("ACP_SUBAGENT_DEFAULT_AGENT_ENV_JSON", {});
 
   return {
-    claude: {
-      description: "默认 Claude ACP 子代理，适合代码审查、实现、调试和多轮修正。",
+    [defaultAgentName]: {
+      description: `默认 ${defaultAgentName} ACP 子代理。`,
       command,
       args,
-      capabilities: ["claude", "code", "review", "analysis", "edit"],
-      system_prompt: "你是一个被父代理调用的 Claude 子代理。严格遵守任务边界，只返回最终结果，不输出隐藏推理。",
-      env_policy: parseAgentEnvPolicyEnv("ACP_SUBAGENT_CLAUDE_ENV_POLICY", parseAgentEnvPolicyEnv("ACP_SUBAGENT_ENV_POLICY", "all")),
-      env_allowlist: parseListEnv("ACP_SUBAGENT_CLAUDE_ENV_ALLOWLIST", parseListEnv("ACP_SUBAGENT_ENV_ALLOWLIST", [])),
+      capabilities: inferDefaultAgentCapabilities(defaultAgentName),
+      system_prompt: `你是一个被父代理调用的 ${defaultAgentName} 子代理。严格遵守任务边界，只返回最终结果，不输出隐藏推理。`,
+      env_policy: parseAgentEnvPolicyEnv("ACP_SUBAGENT_ENV_POLICY", "all"),
+      env_allowlist: parseListEnv("ACP_SUBAGENT_ENV_ALLOWLIST", []),
       env: envFromJson,
-      install_hint: "未找到默认 Claude ACP 子代理命令。请确认 claude-agent-acp 已在 PATH 中；或在 Claude Desktop 的 env 中设置 ACP_SUBAGENT_CLAUDE_COMMAND 为可执行文件绝对路径；或创建 agents.toml 自定义 [agents.claude]。本包不会自动安装具体子代理 adapter。"
+      install_hint: `未找到默认 ${defaultAgentName} ACP 子代理命令：${command}。请确认该命令已在 PATH 中；或设置 ACP_SUBAGENT_DEFAULT_AGENT_COMMAND 为可执行文件绝对路径；或创建 agents.toml 自定义 [agents.${defaultAgentName}]。本包不会自动安装具体子代理 adapter。`
     }
   };
+}
+
+/**
+ * 根据常见 agent 名称推断默认 ACP 命令。
+ */
+function inferDefaultAgentCommand(agentName: string): string {
+  if (agentName === "claude") return "claude-agent-acp";
+  if (agentName === "codex") return "codex-acp";
+  if (agentName === "gemini") return "gemini";
+  return `${agentName}-acp`;
+}
+
+/**
+ * 根据常见 agent 名称推断默认 ACP 参数。
+ */
+function inferDefaultAgentArgs(agentName: string): string[] {
+  if (agentName === "gemini") return ["--acp"];
+  return [];
+}
+
+/**
+ * 根据默认 agent 名称生成简短能力标签。
+ */
+function inferDefaultAgentCapabilities(agentName: string): string[] {
+  const base = [agentName, "code", "review", "analysis", "edit"];
+  return Array.from(new Set(base));
 }
 
 /**
  * 归一化所有 agent 的环境变量继承配置。
  *
  * 这样通过 ACP_SUBAGENT_AGENTS_JSON 增加的 agent 也会获得默认 all 策略，
- * 同时支持全局 ACP_SUBAGENT_ENV_POLICY 和按 agent 名称覆盖。
+ * 同时只保留全局 ACP_SUBAGENT_ENV_POLICY / ACP_SUBAGENT_ENV_ALLOWLIST 作为环境变量入口。
+ * 如需按 agent 单独配置，请使用 agents.toml 或 ACP_SUBAGENT_AGENTS_JSON，避免为某个具体 agent 暴露专用环境变量。
  */
 function normalizeAgentConfigs(agents: Record<string, AgentConfig>): Record<string, AgentConfig> {
   const globalPolicy = normalizeAgentEnvPolicyValue(process.env.ACP_SUBAGENT_ENV_POLICY?.trim());
@@ -352,24 +385,14 @@ function normalizeAgentConfigs(agents: Record<string, AgentConfig>): Record<stri
   const normalized: Record<string, AgentConfig> = {};
 
   for (const [name, agent] of Object.entries(agents)) {
-    const envPrefix = `ACP_SUBAGENT_${toEnvNameFragment(name)}_`;
-    const agentPolicy = normalizeAgentEnvPolicyValue(process.env[`${envPrefix}ENV_POLICY`]?.trim());
-    const agentAllowlist = parseOptionalListEnv(`${envPrefix}ENV_ALLOWLIST`);
     normalized[name] = {
       ...agent,
-      env_policy: agentPolicy ?? globalPolicy ?? normalizeAgentEnvPolicyValue(agent.env_policy as string | undefined) ?? "all",
-      env_allowlist: agentAllowlist ?? globalAllowlist ?? agent.env_allowlist ?? []
+      env_policy: globalPolicy ?? normalizeAgentEnvPolicyValue(agent.env_policy as string | undefined) ?? "all",
+      env_allowlist: globalAllowlist ?? agent.env_allowlist ?? []
     };
   }
 
   return normalized;
-}
-
-/**
- * 把 agent 名称转换为环境变量中安全的片段。
- */
-function toEnvNameFragment(agentName: string): string {
-  return agentName.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 
 /**
@@ -637,7 +660,7 @@ env_policy = "all"
 # env_policy 可选：all | allowlist | none。默认 all，会继承 MCP Server 进程可见的全部环境变量。
 # env_allowlist 只在 env_policy="allowlist" 时生效，支持精确名称和 ANTHROPIC_* 这种前缀通配。
 env_allowlist = ["ANTHROPIC_*", "CLAUDE_*", "PATH", "HOME", "USERPROFILE"]
-install_hint = "请确认 claude-agent-acp 已在 PATH，或用 ACP_SUBAGENT_CLAUDE_COMMAND 指定绝对路径。本包不会自动安装具体子代理 adapter。"
+install_hint = "请确认 claude-agent-acp 已在 PATH，或用 ACP_SUBAGENT_DEFAULT_AGENT_COMMAND 指定绝对路径。本包不会自动安装具体子代理 adapter。"
 
 [agents.claude.env]
 # 这里是可选显式覆盖；默认 all 已经会继承宿主环境。未设置的 from_env 不会以空字符串传给子进程。
@@ -656,7 +679,6 @@ export function renderClaudeDesktopConfigJson(): string {
         args: ["-y", "acp-subagent-mcp"],
         env: {
           ACP_SUBAGENT_DEFAULT_AGENT: "claude",
-          ACP_SUBAGENT_CLAUDE_COMMAND: "claude-agent-acp",
           ACP_SUBAGENT_ENV_POLICY: "all",
           ACP_SUBAGENT_SKILL_MODE: "list"
         }
@@ -697,7 +719,6 @@ env_vars = [
 
 [mcp_servers.acp-subagent.env]
 ACP_SUBAGENT_DEFAULT_AGENT = "claude"
-ACP_SUBAGENT_CLAUDE_COMMAND = "claude-agent-acp"
 ACP_SUBAGENT_ENV_POLICY = "all"
 ACP_SUBAGENT_SKILL_MODE = "list"
 `;
@@ -715,7 +736,6 @@ export function renderGenericMcpConfigJson(): string {
         args: ["-y", "acp-subagent-mcp"],
         env: {
           ACP_SUBAGENT_DEFAULT_AGENT: "claude",
-          ACP_SUBAGENT_CLAUDE_COMMAND: "claude-agent-acp",
           ACP_SUBAGENT_ENV_POLICY: "all",
           ACP_SUBAGENT_SKILL_MODE: "list"
         }
