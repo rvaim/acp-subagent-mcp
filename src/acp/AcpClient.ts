@@ -319,7 +319,13 @@ export class GenericAcpClient {
    */
   async cancel(sessionId: string): Promise<void> {
     this.clientHandler.markCancelled();
-    await this.connection.cancel({ sessionId }).catch(() => undefined);
+    await withTimeout(
+      this.connection.cancel({ sessionId }),
+      this.acpCancelGraceMs,
+      `ACP session/cancel 超过 ${this.acpCancelGraceMs}ms，继续执行强制清理`
+    ).catch((error) => {
+      void this.logger.appendEvent({ type: "cancel_failed_or_timed_out", error: error instanceof Error ? error.message : String(error) });
+    });
   }
 
   /**
@@ -370,27 +376,55 @@ async function racePromptWithAbort(
 ): Promise<acp.PromptResponse> {
   if (!signal) return promptPromise;
   if (signal.aborted) {
-    await onAbort();
+    void onAbort().catch(() => undefined);
     throw signal.reason ?? new Error("request aborted");
   }
 
   return await new Promise<acp.PromptResponse>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", abort);
     const abort = () => {
-      void onAbort().finally(() => reject(signal.reason ?? new Error("request aborted")));
+      if (settled) return;
+      settled = true;
+      cleanup();
+      // ACP cancel 是 best-effort：不能为了等待 agent 响应 cancel 而阻塞本地清理。
+      void onAbort().catch(() => undefined);
+      reject(signal.reason ?? new Error("request aborted"));
     };
 
     signal.addEventListener("abort", abort, { once: true });
     promptPromise.then(
       (value) => {
-        signal.removeEventListener("abort", abort);
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve(value);
       },
       (error) => {
-        signal.removeEventListener("abort", abort);
+        if (settled) return;
+        settled = true;
+        cleanup();
         reject(error);
       }
     );
   });
+}
+
+/**
+ * 为 best-effort ACP 请求加上本地超时，避免取消流程被 agent 卡住。
+ */
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**

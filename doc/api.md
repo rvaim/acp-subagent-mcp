@@ -70,7 +70,7 @@
 
 ### `mode`
 
-`subagent_run`、`subagent_start`、`subagent_start_many` 的任务模式：
+`subagent_run`、`subagent_run_many`、`subagent_start`、`subagent_start_many` 的任务模式：
 
 | 值 | 说明 |
 |---|---|
@@ -257,13 +257,100 @@
 
 ### 取消语义
 
-`subagent_run` 会把当前 MCP request 的取消信号绑定到子代理任务。用户手动停止主 agent 当前响应时，会自动取消 ACP session 并清理子进程树。
+`subagent_run` 会把当前 MCP request 的取消信号绑定到子代理任务。前提是 MCP Host 确实把用户停止当前响应传播为 request cancellation；满足该前提时，本服务会取消 ACP session，并继续清理本地进程树。
 
 ### 使用场景
 
 - 单个任务必须立即拿到结果。
 - 希望用户手动停止主 agent 时同步停止子代理。
 - 不需要多轮 session。
+
+## `subagent_run_many`
+
+同步批量运行多个子代理任务。它会在同一个 MCP tool call 中执行：
+
+```text
+subagent_start_many -> subagent_wait
+```
+
+与手动两步调用相比，`subagent_run_many` 的优势是取消绑定更强：用户停止当前 tool call 时，本服务可以取消本次已经启动的全部仍在运行任务，且没有 `start_many` 已返回、`wait` 尚未开始的窗口。
+
+### 输入
+
+```json
+{
+  "conflict_policy": "allow_readonly_parallel",
+  "on_task_failure": "cancel_all",
+  "return_when": "all_completed",
+  "wait_timeout_secs": 900,
+  "on_timeout": "cancel_pending",
+  "tasks": [
+    {
+      "agent_type": "claude",
+      "cwd": "/Users/you/workspace/app",
+      "mode": "review",
+      "timeout_secs": 600,
+      "task": {
+        "title": "架构审查",
+        "goal": "检查架构风险"
+      }
+    },
+    {
+      "agent_type": "claude",
+      "cwd": "/Users/you/workspace/app",
+      "mode": "review",
+      "timeout_secs": 600,
+      "task": {
+        "title": "测试审查",
+        "goal": "检查测试缺口"
+      }
+    }
+  ]
+}
+```
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `tasks` | 必填 | 与 `subagent_start_many.tasks` 相同，1 到 32 个任务。 |
+| `conflict_policy` | 配置默认值 | 批量任务的冲突策略。 |
+| `on_task_failure` | `keep_others_running` | 某个任务启动失败后继续其他任务，或取消已启动任务。 |
+| `return_when` | `all_completed` | 与 `subagent_wait.return_when` 相同。 |
+| `wait_timeout_secs` | 未设置则使用 `subagent_wait` 默认 | 批量等待最大时间；不影响单个任务自己的 `timeout_secs`。 |
+| `on_timeout` | `cancel_pending` | 等待超时后是否取消仍在运行的任务。 |
+
+### 输出
+
+```json
+{
+  "schema_version": 1,
+  "status": "completed",
+  "started": [],
+  "rejected": [],
+  "completed": [],
+  "failed": [],
+  "pending_task_ids": [],
+  "cancelled_task_ids": [],
+  "elapsed_ms": 1234,
+  "summary": "已启动 2 个，拒绝 0 个；完成 2 个，失败 0 个，仍在运行 0 个。"
+}
+```
+
+`status` 可能是：
+
+- `completed`：等待条件满足，且没有仍在运行任务。
+- `partial`：按 `return_when` 提前返回，例如 `first_completed`。
+- `timeout`：等待超时。
+- `failed`：没有任何任务成功启动。
+
+### 取消语义
+
+`subagent_run_many` 会把当前 MCP request cancellation 绑定到本次启动的所有任务。前提仍然是 MCP Host 确实发送 request cancellation。收到取消后，本服务会对所有仍在运行任务执行 best-effort ACP `session/cancel`，然后继续本地强制清理进程树。
+
+### 使用场景
+
+- 多个子代理 fan-out/fan-in，最终由主 agent 汇总。
+- 用户手动停止当前回答时，要求本批子代理一起停止。
+- 希望减少 `start_many` 与 `wait` 两步之间的取消盲区。
 
 ## `subagent_start`
 
@@ -309,7 +396,7 @@
 ### 取消语义
 
 - 如果用户在 `subagent_start` 尚未返回前停止当前 request，任务会被取消。
-- 如果 `subagent_start` 已经返回，后台任务不再绑定已结束 request。要让后续手动停止也取消任务，应立即调用 `subagent_wait` 覆盖该 `task_id`。
+- 如果 `subagent_start` 已经返回，后台任务不再绑定已结束 request。要让后续手动停止也取消任务，应立即调用 `subagent_wait` 覆盖该 `task_id`。多任务场景下优先使用 `subagent_run_many`。
 
 ### 使用场景
 
@@ -789,8 +876,8 @@
 |---|---|
 | 单任务同步且可被用户停止 | `subagent_run` |
 | 单任务异步但用户停止 wait 时取消 | `subagent_start` -> `subagent_wait(task_ids=[id])` |
-| 多任务全部完成后汇总且用户停止时全部取消 | `subagent_start_many` -> `subagent_wait(return_when="all_completed", task_ids=全部)` |
-| 多任务先完成先处理 | `subagent_start_many` -> 循环 `subagent_wait(return_when="first_completed")` |
+| 多任务全部完成后汇总且用户停止时全部取消 | 优先 `subagent_run_many(return_when="all_completed")`；兼容两步为 `subagent_start_many` -> `subagent_wait(...)` |
+| 多任务先完成先处理 | `subagent_run_many(return_when="first_completed")` 或 `subagent_start_many` -> 循环 `subagent_wait(...)` |
 | 多任务后台轮询 | `subagent_start_many` -> `subagent_wait(return_when="timeout_partial", timeout_secs=短, on_timeout="keep_running")` |
 | 多轮修正 | `subagent_start(keep_alive=true)` -> `subagent_wait` -> `subagent_continue` -> `subagent_wait` -> `subagent_close` |
 | 提前终止剩余任务 | `subagent_cancel` |

@@ -246,12 +246,22 @@ export const subagentStartManyInputSchema = z.object({
   on_task_failure: z.enum(["keep_others_running", "cancel_all"]).default("keep_others_running")
 }).strict();
 
+const waitReturnWhenSchema = z.enum(["all_completed", "first_completed", "first_success", "first_failure", "any_update", "timeout_partial"]);
+const waitOnTimeoutSchema = z.enum(["keep_running", "cancel_pending"]);
+
+/** subagent_run_many 输入 zod schema。 */
+export const subagentRunManyInputSchema = subagentStartManyInputSchema.extend({
+  return_when: waitReturnWhenSchema.default("all_completed"),
+  wait_timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
+  on_timeout: waitOnTimeoutSchema.default("cancel_pending")
+}).strict();
+
 /** subagent_wait 输入 zod schema。 */
 export const subagentWaitInputSchema = z.object({
   task_ids: z.array(z.string().min(1)).min(1).max(64),
-  return_when: z.enum(["all_completed", "first_completed", "first_success", "first_failure", "any_update", "timeout_partial"]),
+  return_when: waitReturnWhenSchema,
   timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
-  on_timeout: z.enum(["keep_running", "cancel_pending"]).default("keep_running")
+  on_timeout: waitOnTimeoutSchema.default("keep_running")
 }).strict();
 
 /** subagent_result 输入 zod schema。 */
@@ -318,6 +328,17 @@ export const subagentStartManyInputJsonSchema = {
     tasks: { type: "array", minItems: 1, maxItems: 32, items: subagentStartInputJsonSchema },
     conflict_policy: { type: "string", enum: ["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"] },
     on_task_failure: { type: "string", enum: ["keep_others_running", "cancel_all"], default: "keep_others_running" }
+  }
+} as const;
+
+/** run_many 工具 JSON schema。 */
+export const subagentRunManyInputJsonSchema = {
+  ...subagentStartManyInputJsonSchema,
+  properties: {
+    ...subagentStartManyInputJsonSchema.properties,
+    return_when: { type: "string", enum: ["all_completed", "first_completed", "first_success", "first_failure", "any_update", "timeout_partial"], default: "all_completed" },
+    wait_timeout_secs: { type: "integer", minimum: 1, description: "批量等待最大时间，单位秒；不影响单个任务自己的 timeout_secs" },
+    on_timeout: { type: "string", enum: ["keep_running", "cancel_pending"], default: "cancel_pending" }
   }
 } as const;
 

@@ -76,14 +76,9 @@ export function spawnAgentProcess(options: {
  * 尝试终止子进程树。
  */
 export async function terminateProcessTree(child: ChildProcessWithoutNullStreams, options: { sigtermGraceMs: number; sigkillGraceMs: number }): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    destroyChildStdio(child);
-    return;
-  }
-
   try {
     if (process.platform === "win32") {
-      child.kill("SIGTERM");
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
       await delay(options.sigtermGraceMs);
       if (child.exitCode === null && child.signalCode === null) {
         await taskkillProcessTree(child.pid);
@@ -92,12 +87,29 @@ export async function terminateProcessTree(child: ChildProcessWithoutNullStreams
       return;
     }
 
-    sendSignal(child, "SIGTERM");
-    await delay(options.sigtermGraceMs);
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    // Unix 下子代理以 detached process group 启动。即使 group leader
+    // claude-agent-acp 已经退出，孙进程 claude 仍可能留在同一个 PGID 中；
+    // 因此不能只看 child.exitCode，必须优先尝试杀整个进程组。
+    const pid = child.pid;
+    const hasProcessGroup = pid ? isProcessGroupAlive(pid) : false;
+    if (hasProcessGroup) {
+      sendSignal(child, "SIGTERM");
+      await delay(options.sigtermGraceMs);
+      if (isProcessGroupAlive(pid!)) {
+        sendSignal(child, "SIGKILL");
+        await delay(options.sigkillGraceMs);
+      }
+      return;
+    }
 
-    sendSignal(child, "SIGKILL");
-    await delay(options.sigkillGraceMs);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      await delay(options.sigtermGraceMs);
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await delay(options.sigkillGraceMs);
+      }
+    }
   } finally {
     destroyChildStdio(child);
   }
@@ -206,6 +218,18 @@ function sendSignal(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signal
     child.kill(signal);
   } catch {
     // 进程可能已经退出，忽略。
+  }
+}
+
+/**
+ * 判断 Unix process group 是否仍有成员。
+ */
+function isProcessGroupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 

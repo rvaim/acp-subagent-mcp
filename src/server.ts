@@ -9,6 +9,7 @@ import { handleSubagentList } from "./tools/subagentList.js";
 import { handleSubagentRun } from "./tools/subagentRun.js";
 import { handleSubagentStart } from "./tools/subagentStart.js";
 import { handleSubagentStartMany } from "./tools/subagentStartMany.js";
+import { handleSubagentRunMany } from "./tools/subagentRunMany.js";
 import { handleSubagentWait } from "./tools/subagentWait.js";
 import { handleSubagentResult } from "./tools/subagentResult.js";
 import { handleSubagentContinue } from "./tools/subagentContinue.js";
@@ -28,6 +29,7 @@ import {
   subagentLogsInputJsonSchema,
   subagentResultInputJsonSchema,
   subagentRunInputJsonSchema,
+  subagentRunManyInputJsonSchema,
   subagentRunOutputJsonSchema,
   subagentStartInputJsonSchema,
   subagentStartManyInputJsonSchema,
@@ -64,6 +66,7 @@ export async function startMcpServer(config: AppConfig): Promise<void> {
     try {
       if (name === "subagent_list") return toMcpResult(handleSubagentList(config));
       if (name === "subagent_run") return toMcpResult(await handleSubagentRun(args ?? {}, requestDeps));
+      if (name === "subagent_run_many") return toMcpResult(await handleSubagentRunMany(args ?? {}, requestDeps));
       if (name === "subagent_skills") return toMcpResult(await handleSubagentSkills(args ?? {}, config));
       if (name === "subagent_start") return toMcpResult(await handleSubagentStart(args ?? {}, requestDeps));
       if (name === "subagent_start_many") return toMcpResult(await handleSubagentStartMany(args ?? {}, requestDeps));
@@ -135,6 +138,13 @@ function buildToolDefinitions(): Tool[] {
       inputSchema: subagentRunInputJsonSchema,
       outputSchema: subagentRunOutputJsonSchema,
       annotations: { title: "Run subagent", readOnlyHint: false, destructiveHint: true, idempotentHint: false }
+    } as unknown as Tool,
+    {
+      name: "subagent_run_many",
+      description: "同步批量运行多个任务；同一 tool call 内启动并等待，停止时一起取消。",
+      inputSchema: subagentRunManyInputJsonSchema,
+      outputSchema: genericToolOutputJsonSchema,
+      annotations: { title: "Run many subagents", readOnlyHint: false, destructiveHint: true, idempotentHint: false }
     } as unknown as Tool,
     {
       name: "subagent_skills",

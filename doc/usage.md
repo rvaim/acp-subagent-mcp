@@ -2,15 +2,17 @@
 
 本项目提供的是 MCP tool 层面的子代理编排 API。主 agent 不需要直接管理子进程，也不需要直接读 ACP 协议；只需要选择合适的工具组合。
 
+取消语义只对“真实 MCP tool call”成立：MCP Host 必须把用户停止当前响应转换成正在执行的 tool request cancellation。不要用主 agent 的 shell / exec 临时写一个 Node harness 来测试“停止对话自动杀子代理”，除非该 harness 自己把进程信号桥接成 `AbortSignal` 并调用清理函数；否则它绕过了 MCP Server 的 request cancellation 入口。
+
 ## 工具选择速查
 
 | 目标 | 推荐组合 |
 |---|---|
 | 单个任务，等待结果 | `subagent_run` |
 | 单个后台任务，稍后查询 | `subagent_start` -> `subagent_result` / `subagent_wait` |
-| 多个任务并发运行，全部完成后合并 | `subagent_start_many` -> `subagent_wait(return_when="all_completed")` |
-| 多个任务并发运行，先完成先处理 | `subagent_start_many` -> 循环 `subagent_wait(return_when="first_completed")` |
-| 多个任务并发运行，用户手动停止主 agent 时一起停止 | `subagent_start_many` -> 立即 `subagent_wait(task_ids=全部, timeout_secs=足够长)` |
+| 多个任务并发运行，全部完成后合并 | 优先 `subagent_run_many(return_when="all_completed")`；需要后台队列时用 `subagent_start_many` -> `subagent_wait` |
+| 多个任务并发运行，先完成先处理 | `subagent_run_many(return_when="first_completed")` 或 `subagent_start_many` -> 循环 `subagent_wait(return_when="first_completed")` |
+| 多个任务并发运行，用户手动停止主 agent 时一起停止 | 优先 `subagent_run_many(wait_timeout_secs=足够长, on_timeout="cancel_pending")` |
 | 多轮任务 | `subagent_start(keep_alive=true)` -> `subagent_wait` -> `subagent_continue` -> `subagent_wait` -> `subagent_close` |
 | 后台任务主动取消 | `subagent_cancel` |
 | 释放保留 session | `subagent_close` |
@@ -55,7 +57,7 @@
 行为：
 
 - 当前 MCP tool call 会等待任务结束。
-- 如果用户手动停止当前主 agent 响应，子代理会被取消并清理进程树。
+- 如果 MCP Host 把用户手动停止当前响应传播为 MCP request cancellation，子代理会被取消并清理进程树。
 - 返回值直接包含 `status`、`summary`、`result`、`findings`、`files_changed`、`artifacts` 和 `errors`。
 
 ## 场景二：启动一个后台任务并等待
@@ -108,18 +110,21 @@
 }
 ```
 
-这个组合的好处是：如果 MCP Host 在用户停止当前主 agent 响应时取消正在执行的 `wait` request，本服务会取消 `task_abc123`。
+这个组合的好处是：如果 MCP Host 在用户停止当前主 agent 响应时取消正在执行的 `wait` request，本服务会取消 `task_abc123`。如果你是直接在 shell 中运行测试脚本，则必须显式传入 `requestSignal`，否则 `wait` 无法感知停止。
 
 ## 场景三：拉起多个子代理，用户停止主 agent 时一起停止
 
-这是最推荐的“批量并发 + 可取消”模式。
+这是最推荐的“批量并发 + 可取消”模式。优先使用 `subagent_run_many`，因为它在同一个 MCP tool call 内完成“启动多个任务 + 等待结果”。用户停止当前 tool call 时，本服务可以直接取消本次启动的全部仍在运行任务。
 
-第一步，调用 `subagent_start_many`：
+调用 `subagent_run_many`：
 
 ```json
 {
   "conflict_policy": "allow_readonly_parallel",
   "on_task_failure": "cancel_all",
+  "return_when": "all_completed",
+  "wait_timeout_secs": 900,
+  "on_timeout": "cancel_pending",
   "tasks": [
     {
       "cwd": "/Users/you/workspace/app",
@@ -158,7 +163,14 @@
 }
 ```
 
-第二步，把返回的 `started[].task_id` 全部放入 `subagent_wait`：
+返回值会同时包含：
+
+- `started`：已经启动成功的任务。
+- `rejected`：启动阶段被拒绝或失败的任务。
+- `completed` / `failed`：等待阶段已经进入终态的结果。
+- `pending_task_ids`：还在运行的任务。如果 `on_timeout="cancel_pending"`，超时后这些任务会被取消。
+
+如果必须使用两步异步 API，也可以先 `subagent_start_many`，再把返回的 `started[].task_id` 全部放入 `subagent_wait`：
 
 ```json
 {
@@ -169,7 +181,7 @@
 }
 ```
 
-为什么需要第二步：`subagent_start_many` 返回后，启动请求已经结束，后台任务不再绑定这个已结束请求的取消信号。`subagent_wait` 会重新把这些任务绑定到当前主 agent 正在等待的 request 上。如果停止动作被 MCP Host 映射为取消这个 wait request，wait 会取消自己覆盖的所有仍在运行任务。
+为什么两步模式弱一些：`subagent_start_many` 返回后，启动请求已经结束，后台任务不再绑定这个已结束请求的取消信号。`subagent_wait` 会重新把这些任务绑定到当前主 agent 正在等待的 request 上；但在 `start_many` 返回和 `wait` 开始之间存在一个短暂窗口。`subagent_run_many` 没有这个窗口。这里的“绑定”不是靠 prompt 约定完成的，而是靠 MCP SDK 传入的 `requestSignal`；自定义 harness 需要自己提供这个 signal。
 
 ## 场景四：多个子代理先完成先处理
 

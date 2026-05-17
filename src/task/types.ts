@@ -451,6 +451,34 @@ export interface SubagentStartManyOutput {
 }
 
 /**
+ * 同步批量运行多个子代理任务的输入参数。
+ *
+ * 与 start_many 相同的启动参数之后，会在同一个 MCP tool call 内立即 wait。
+ */
+export interface SubagentRunManyInput extends SubagentStartManyInput {
+  /** 等待返回策略；默认 all_completed。 */
+  return_when?: SubagentWaitInput["return_when"];
+  /** 批量等待最大时间，单位秒；不影响单个任务自己的 timeout_secs。 */
+  wait_timeout_secs?: number;
+  /** 等待超时后如何处理未完成任务；默认 cancel_pending。 */
+  on_timeout?: SubagentWaitInput["on_timeout"];
+}
+
+/**
+ * 同步批量运行多个子代理任务后的返回结果。
+ */
+export interface SubagentRunManyOutput extends Omit<SubagentWaitOutput, "status" | "summary"> {
+  /** 等待结果状态；failed 表示没有任何任务成功启动。 */
+  status: SubagentWaitOutput["status"] | "failed";
+  /** 已启动任务。 */
+  started: SubagentStartOutput[];
+  /** 被拒绝或启动失败的任务。 */
+  rejected: SubagentStartManyOutput["rejected"];
+  /** 一句话摘要。 */
+  summary: string;
+}
+
+/**
  * 等待一个或多个子代理任务的输入参数。
  */
 export interface SubagentWaitInput {

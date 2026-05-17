@@ -33,7 +33,7 @@
 - 默认 Claude 子代理：`agent_type` 可省略，自动使用 `claude`。
 - 支持 npm / npx / Claude Desktop / Codex CLI / Codex 配置文件 / 通用 MCP Host 的 stdio 配置方式。
 - 支持主 agent Skill 桥接：默认扫描项目级 `.claude/skills` 和用户级 `~/.claude/skills`，以低 token 清单形式注入给子代理。
-- 支持同步、异步、批量并发运行、多轮、取消、关闭和日志读取。
+- 支持同步、异步、批量并发运行、多轮、取消、关闭和日志读取；多任务强绑定取消建议使用 `subagent_run_many`。
 - 默认 compact 输出，减少主 agent token 消耗。
 - 默认环境变量策略是 `all`，子代理会继承 MCP Server 进程可见的全部环境变量；需要收紧时可改成 `allowlist` 或 `none`。
 - 默认禁止动态 `mcp_servers`，只能引用配置或环境变量中受信的 profile。
@@ -262,6 +262,8 @@ acp-subagent-mcp --print-default-config > agents.toml
 
 更多同步、异步、批量、取消、多轮和日志场景见 [doc/usage.md](doc/usage.md)，完整工具参数见 [doc/api.md](doc/api.md)。
 
+取消语义有一个重要前提：MCP Host 必须把用户停止当前回答传播为正在执行的 MCP request cancellation。本服务收到该信号后会执行 best-effort ACP cancel，并继续强制清理本地进程树。不要用主 agent 通过 shell 写出的临时 Node harness 来代表真实 MCP cancellation；这种脚本需要自己处理 `SIGINT` / `SIGTERM` 和 `AbortSignal`。
+
 ## 本地开发
 
 ```bash
@@ -275,12 +277,13 @@ mock agent smoke test 覆盖：
 
 - `subagent_run`
 - `subagent_start`
+- `subagent_run_many`
 - `subagent_wait`
 - `subagent_continue`
 - `subagent_result`
 - `subagent_start_many`
 - `subagent_close`
-- MCP request cancellation：模拟 Host 手动停止 `subagent_run` 和 `subagent_wait` 时，确认子代理会被取消并清理进程树。
+- MCP request cancellation：模拟 Host 手动停止 `subagent_run`、`subagent_run_many` 和 `subagent_wait` 时，确认子代理会被取消并清理进程树；同时覆盖 adapter 不响应 ACP cancel 时的本地强制清理。
 
 ## 发布到 npm
 
