@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,28 +87,21 @@ export async function terminateProcessTree(child: ChildProcessWithoutNullStreams
       return;
     }
 
-    // Unix 下子代理以 detached process group 启动。即使 group leader
-    // claude-agent-acp 已经退出，孙进程 claude 仍可能留在同一个 PGID 中；
-    // 因此不能只看 child.exitCode，必须优先尝试杀整个进程组。
     const pid = child.pid;
-    const hasProcessGroup = pid ? isProcessGroupAlive(pid) : false;
-    if (hasProcessGroup) {
-      sendSignal(child, "SIGTERM");
-      await delay(options.sigtermGraceMs);
-      if (isProcessGroupAlive(pid!)) {
-        sendSignal(child, "SIGKILL");
-        await delay(options.sigkillGraceMs);
-      }
-      return;
-    }
+    if (!pid) return;
 
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-      await delay(options.sigtermGraceMs);
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-        await delay(options.sigkillGraceMs);
-      }
+    // macOS/Linux 下 adapter 可能再启动孙进程，且孙进程不一定保留在
+    // adapter 的 process group 中。清理时同时覆盖：
+    // 1. root pid；2. root pid 作为 PGID 的 detached group；
+    // 3. ps 快照里能看到的所有后代 PID 和它们自己的 PGID。
+    const targets = collectUnixKillTargets(pid);
+    signalUnixKillTargets(targets, "SIGTERM");
+    await delay(options.sigtermGraceMs);
+
+    if (isUnixKillTargetsAlive(targets) || isUnixProcessTreeAlive(pid)) {
+      signalUnixKillTargets(targets, "SIGKILL");
+      signalUnixProcessTree(pid, "SIGKILL");
+      await delay(options.sigkillGraceMs);
     }
   } finally {
     destroyChildStdio(child);
@@ -227,6 +220,157 @@ function sendSignal(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signal
 function isProcessGroupAlive(pid: number): boolean {
   try {
     process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
+interface UnixProcessInfo {
+  pid: number;
+  ppid: number;
+  pgid: number;
+}
+
+interface UnixKillTargets {
+  pids: Set<number>;
+  pgids: Set<number>;
+}
+
+/**
+ * 收集 Unix kill 目标。必须在第一次 SIGTERM 前完成，避免 root 退出后
+ * detached 孙进程被 reparent 到 init，后续再按 PPID 就找不到。
+ */
+function collectUnixKillTargets(rootPid: number): UnixKillTargets {
+  const processes = collectUnixProcessTree(rootPid);
+  return {
+    pids: new Set<number>([rootPid, ...processes.map((item) => item.pid)]),
+    pgids: new Set<number>([rootPid, ...processes.map((item) => item.pgid).filter((pgid) => pgid > 1)])
+  };
+}
+
+/**
+ * 向 Unix 进程树和相关进程组发送信号。
+ */
+function signalUnixProcessTree(rootPid: number, signal: NodeJS.Signals): void {
+  signalUnixKillTargets(collectUnixKillTargets(rootPid), signal);
+}
+
+/**
+ * 向已收集的 Unix kill 目标发送信号。
+ */
+function signalUnixKillTargets(targets: UnixKillTargets, signal: NodeJS.Signals): void {
+  const currentPgid = getProcessGroupId(process.pid);
+
+  for (const pgid of targets.pgids) {
+    if (pgid <= 1 || pgid === currentPgid) continue;
+    try {
+      process.kill(-pgid, signal);
+    } catch {
+      // 进程组可能已经消失，继续尝试单独 PID。
+    }
+  }
+
+  // 先杀子孙，再杀 root，减少 adapter 继续向子进程写入的窗口。
+  const orderedPids = [...targets.pids].sort((a, b) => b - a);
+  for (const pid of orderedPids) {
+    if (pid <= 1 || pid === process.pid) continue;
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // 进程可能已经退出，忽略。
+    }
+  }
+}
+
+/**
+ * 判断已收集的 Unix kill 目标是否仍有存活成员。
+ */
+function isUnixKillTargetsAlive(targets: UnixKillTargets): boolean {
+  for (const pid of targets.pids) {
+    if (isPidAlive(pid)) return true;
+  }
+  for (const pgid of targets.pgids) {
+    if (isProcessGroupAlive(pgid)) return true;
+  }
+  return false;
+}
+
+/**
+ * 判断 root pid、root process group 或其后代是否仍然存活。
+ */
+function isUnixProcessTreeAlive(rootPid: number): boolean {
+  if (isPidAlive(rootPid)) return true;
+  if (isProcessGroupAlive(rootPid)) return true;
+  return collectUnixProcessTree(rootPid).some((item) => isPidAlive(item.pid) || isProcessGroupAlive(item.pgid));
+}
+
+/**
+ * 收集 root 进程和当前可见的所有后代进程。
+ */
+function collectUnixProcessTree(rootPid: number): UnixProcessInfo[] {
+  const all = listUnixProcesses();
+  const byPid = new Map(all.map((item) => [item.pid, item]));
+  const byPpid = new Map<number, UnixProcessInfo[]>();
+  for (const item of all) {
+    const siblings = byPpid.get(item.ppid) ?? [];
+    siblings.push(item);
+    byPpid.set(item.ppid, siblings);
+  }
+
+  const result: UnixProcessInfo[] = [];
+  const seen = new Set<number>();
+  const root = byPid.get(rootPid);
+  if (root) {
+    result.push(root);
+    seen.add(root.pid);
+  }
+
+  const queue = [rootPid];
+  while (queue.length > 0) {
+    const parent = queue.shift()!;
+    for (const child of byPpid.get(parent) ?? []) {
+      if (seen.has(child.pid)) continue;
+      seen.add(child.pid);
+      result.push(child);
+      queue.push(child.pid);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 读取 Unix 进程表。失败时返回空数组，仍可依赖 root PID/PGID 兜底。
+ */
+function listUnixProcesses(): UnixProcessInfo[] {
+  const output = spawnSync("ps", ["-axo", "pid=,ppid=,pgid="], { encoding: "utf8" });
+  if (output.status !== 0 || !output.stdout) return [];
+
+  return output.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim().split(/\s+/).map((value) => Number(value)))
+    .filter((parts) => parts.length >= 3 && parts.every((value) => Number.isFinite(value)))
+    .map(([pid, ppid, pgid]) => ({ pid, ppid, pgid }));
+}
+
+/**
+ * 获取指定 PID 的 process group id。
+ */
+function getProcessGroupId(pid: number): number | undefined {
+  const output = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" });
+  if (output.status !== 0 || !output.stdout) return undefined;
+  const pgid = Number(output.stdout.trim());
+  return Number.isFinite(pgid) ? pgid : undefined;
+}
+
+/**
+ * 判断 PID 是否仍然存活。
+ */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
     return true;
   } catch {
     return false;

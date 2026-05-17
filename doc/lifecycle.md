@@ -22,14 +22,17 @@
 尤其要区分两种测试方式：
 
 - 真实 MCP 调用：主 agent 调用 `subagent_run`、`subagent_run_many` 或 `subagent_wait`，Host 把停止动作映射为 MCP request cancellation，此时本服务会级联取消并强制清理进程树。
-- 临时 shell / Node harness：主 agent 在终端里执行 `node tmp/run-xxx.mjs`，这个脚本直接 import 内部函数。除非脚本自己安装 `SIGINT/SIGTERM/exit` 清理钩子，或者 Codex/终端确实杀掉该脚本进程，否则它不会收到 MCP request 的 `AbortSignal`。这种方式不能证明 MCP tool cancellation 是否生效。
+- 临时 shell / Node harness：主 agent 在终端里执行 `node tmp/run-xxx.mjs`。即使这个脚本通过 stdio 再调用本 MCP Server，它本身也只是一个普通 shell 子进程；除非 Codex/终端真的杀掉该脚本进程，或脚本自己安装 `SIGINT/SIGTERM/exit` 清理钩子，否则它仍会继续持有 MCP request，MCP Server 看到的就是“请求还在运行”，不会触发 request cancellation。
 
-因此，如果看到 `node tmp/run-xxx.mjs`、`claude-agent-acp`、`claude` 仍在系统进程中，通常有两类原因：
+因此，如果看到 `node tmp/run-xxx.mjs`、`claude-agent-acp`、`claude` 仍在系统进程中，通常有三类原因：
 
-1. 使用了临时 harness 或后台 shell 进程，绕过了 MCP request cancellation。
+1. 使用了临时 harness 或后台 shell 进程；停止主 agent 文本输出并没有杀掉这个 harness。
 2. 当前 Host 没有把“停止当前回答”转成 MCP cancellation，只是停止了模型继续生成文本。
+3. ACP adapter 又启动了孙进程，且孙进程没有留在 adapter 的 process group 中；只杀 adapter 进程组可能漏掉孙进程。
 
-本版本已经把取消流程改成“ACP cancel best-effort + 本地强制清理”：即使 ACP adapter 不响应 `session/cancel`，本服务也不会一直等它，而会继续关闭 stdio 并向子进程组发送 `SIGTERM`，宽限后再 `SIGKILL`。
+排查时先看是否仍有 `node tmp/run-xxx.mjs`。如果它还活着，说明当前测试脚本还在继续持有请求；应该先停止这个 launcher，再清理 adapter / Claude 进程。真正的 MCP tool 取消测试不应该通过 shell launcher 完成，而应该把本 MCP Server 配到 Codex/Claude Desktop 等 Host，让主 agent 直接调用 `subagent_run_many` 这个 MCP tool。
+
+本版本的取消流程是“ACP cancel best-effort + 本地强制清理”：即使 ACP adapter 不响应 `session/cancel`，本服务也不会一直等它，而会继续关闭 stdio，并在 Unix 下同时扫描 adapter 进程树、adapter process group 以及孙进程自己的 process group，先发 `SIGTERM`，宽限后再 `SIGKILL`。
 
 ## 单个子代理启动是同步的吗？
 
@@ -58,7 +61,7 @@
 ```text
 用户停止主 agent 当前响应
   -> MCP request AbortSignal abort
-  -> cancelActiveTask()
+  -> forceCancelActiveTask()
   -> 当前 prompt 的 timeout/abort controller 进入 cancelled
   -> best-effort ACP session/cancel
   -> 不等待 ACP adapter 响应，turn 立即进入 finally
@@ -211,7 +214,7 @@ MCP Server 内部 GenericAcpClient
 
 | 机制 | 触发方式 | 对子代理做什么 | 适合场景 |
 |---|---|---|---|
-| request cancellation | 用户停止当前 tool call / MCP SDK abort signal | 对绑定任务调用 `cancelActiveTask()` | 让用户手动停止主 agent 时同步停止子代理。 |
+| request cancellation | 用户停止当前 tool call / MCP SDK abort signal | 对绑定任务调用 `forceCancelActiveTask()`，不等待 ACP cancel 自然完成 | 让用户手动停止主 agent 时同步停止子代理。 |
 | `subagent_cancel` | 主 agent 显式调用 | ACP `session/cancel`，任务进入取消流程 | 主动取消后台任务。 |
 | `subagent_close(force=false)` | 主 agent 显式调用 | 只允许关闭已完成任务/session | 释放 `keep_alive` session。 |
 | `subagent_close(force=true)` | 主 agent 显式调用 | 先取消运行中任务，再关闭并清理 | 强制释放资源。 |

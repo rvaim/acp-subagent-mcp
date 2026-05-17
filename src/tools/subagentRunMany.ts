@@ -1,8 +1,11 @@
 import type { SubagentRunManyInput, SubagentRunManyOutput } from "../task/types.js";
 import type { SubagentTaskRunnerDependencies } from "../runtime/taskRunner.js";
+import { forceCancelActiveTask } from "../runtime/taskRunner.js";
 import { handleSubagentStartMany } from "./subagentStartMany.js";
 import { handleSubagentWait } from "./subagentWait.js";
 import { subagentRunManyInputSchema } from "./schemas.js";
+import { SubagentRuntimeError } from "../runtime/errors.js";
+import { isFinishedTaskState } from "../runtime/taskRegistry.js";
 
 /**
  * 同步批量运行多个子代理任务。
@@ -36,23 +39,68 @@ export async function handleSubagentRunMany(rawInput: unknown, deps: SubagentTas
     };
   }
 
-  const wait = await handleSubagentWait({
-    task_ids: taskIds,
-    return_when: input.return_when ?? "all_completed",
-    timeout_secs: input.wait_timeout_secs,
-    on_timeout: input.on_timeout ?? "cancel_pending"
-  }, deps);
+  const detachAbort = bindRequestAbortToTaskIds(taskIds, deps, "MCP run_many call 已取消");
+  try {
+    await throwIfRunManyAborted(taskIds, deps);
+    const wait = await handleSubagentWait({
+      task_ids: taskIds,
+      return_when: input.return_when ?? "all_completed",
+      timeout_secs: input.wait_timeout_secs,
+      on_timeout: input.on_timeout ?? "cancel_pending"
+    }, deps);
 
-  return {
-    schema_version: 1,
-    status: wait.status,
-    started: start.started,
-    rejected: start.rejected,
-    completed: wait.completed,
-    failed: wait.failed,
-    pending_task_ids: wait.pending_task_ids,
-    cancelled_task_ids: wait.cancelled_task_ids,
-    elapsed_ms: Date.now() - startedAt,
-    summary: `已启动 ${start.started.length} 个，拒绝 ${start.rejected.length} 个；${wait.summary}`
+    return {
+      schema_version: 1,
+      status: wait.status,
+      started: start.started,
+      rejected: start.rejected,
+      completed: wait.completed,
+      failed: wait.failed,
+      pending_task_ids: wait.pending_task_ids,
+      cancelled_task_ids: wait.cancelled_task_ids,
+      elapsed_ms: Date.now() - startedAt,
+      summary: `已启动 ${start.started.length} 个，拒绝 ${start.rejected.length} 个；${wait.summary}`
+    };
+  } finally {
+    detachAbort();
+  }
+}
+
+/**
+ * 让 run_many 在 start_many 返回后、wait 真正进入等待前也受同一个 request cancellation 保护。
+ */
+function bindRequestAbortToTaskIds(taskIds: string[], deps: SubagentTaskRunnerDependencies, reason: string): () => void {
+  const signal = deps.requestSignal;
+  if (!signal) return () => undefined;
+
+  const onAbort = () => {
+    void forceCancelTasksById(taskIds, deps, reason);
   };
+
+  if (signal.aborted) {
+    onAbort();
+    return () => undefined;
+  }
+
+  signal.addEventListener("abort", onAbort, { once: true });
+  return () => signal.removeEventListener("abort", onAbort);
+}
+
+/**
+ * 若 run_many 请求已经取消，先强制清理本批任务再抛出取消错误。
+ */
+async function throwIfRunManyAborted(taskIds: string[], deps: SubagentTaskRunnerDependencies): Promise<void> {
+  if (!deps.requestSignal?.aborted) return;
+  await forceCancelTasksById(taskIds, deps, "MCP run_many call 已取消");
+  throw new SubagentRuntimeError("cancelled", "MCP run_many call 已取消", { recoverable: true });
+}
+
+/**
+ * 强制取消指定任务集合。
+ */
+async function forceCancelTasksById(taskIds: string[], deps: SubagentTaskRunnerDependencies, reason: string): Promise<void> {
+  await Promise.allSettled(taskIds.map(async (taskId) => {
+    const task = deps.registry.get(taskId);
+    if (task && !isFinishedTaskState(task.status)) await forceCancelActiveTask(task, deps, reason).catch(() => undefined);
+  }));
 }

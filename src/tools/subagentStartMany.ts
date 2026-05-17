@@ -1,6 +1,6 @@
 import type { SubagentStartManyInput, SubagentStartManyOutput, SubagentStartOutput } from "../task/types.js";
 import type { SubagentTaskRunnerDependencies } from "../runtime/taskRunner.js";
-import { cancelActiveTask, startSubagentTask } from "../runtime/taskRunner.js";
+import { forceCancelActiveTask, startSubagentTask } from "../runtime/taskRunner.js";
 import { SubagentRuntimeError } from "../runtime/errors.js";
 import { toSubagentError } from "../runtime/errors.js";
 import { rejectDynamicMcpServers } from "../runtime/security.js";
@@ -44,7 +44,7 @@ export async function handleSubagentStartMany(rawInput: unknown, deps: SubagentT
       if (input.on_task_failure === "cancel_all") {
         for (const taskId of startedTaskIds) {
           const task = deps.registry.get(taskId);
-          if (task) await cancelActiveTask(task, "start_many 中有任务启动失败，按策略取消全部").catch(() => undefined);
+          if (task) await forceCancelActiveTask(task, deps, "start_many 中有任务启动失败，按策略取消全部").catch(() => undefined);
         }
         break;
       }
@@ -67,6 +67,6 @@ export async function handleSubagentStartMany(rawInput: unknown, deps: SubagentT
 async function cancelStartedTasks(taskIds: string[], deps: SubagentTaskRunnerDependencies, reason: string): Promise<void> {
   await Promise.allSettled(taskIds.map(async (taskId) => {
     const task = deps.registry.get(taskId);
-    if (task) await cancelActiveTask(task, reason).catch(() => undefined);
+    if (task) await forceCancelActiveTask(task, deps, reason).catch(() => undefined);
   }));
 }

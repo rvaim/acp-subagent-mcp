@@ -2,7 +2,7 @@
 
 本项目提供的是 MCP tool 层面的子代理编排 API。主 agent 不需要直接管理子进程，也不需要直接读 ACP 协议；只需要选择合适的工具组合。
 
-取消语义只对“真实 MCP tool call”成立：MCP Host 必须把用户停止当前响应转换成正在执行的 tool request cancellation。不要用主 agent 的 shell / exec 临时写一个 Node harness 来测试“停止对话自动杀子代理”，除非该 harness 自己把进程信号桥接成 `AbortSignal` 并调用清理函数；否则它绕过了 MCP Server 的 request cancellation 入口。
+取消语义只对“真实 MCP tool call”成立：MCP Host 必须把用户停止当前响应转换成正在执行的 tool request cancellation。不要用主 agent 的 shell / exec 临时写一个 Node harness 来测试“停止对话自动杀子代理”；即使该 harness 通过 stdio 调用本 MCP Server，只要 `node tmp/run-xxx.mjs` 还在进程表里，它就仍然持有 MCP request，服务端看到的是“请求仍在运行”。这种 harness 必须自己处理 `SIGINT` / `SIGTERM`，并在退出时关闭 MCP transport 或显式杀掉进程树。
 
 ## 工具选择速查
 
@@ -18,6 +18,26 @@
 | 释放保留 session | `subagent_close` |
 | 读取调试日志 | `subagent_logs` |
 | 查看可用子代理和 Skill 桥接状态 | `subagent_list` / `subagent_skills` |
+
+## 故障排查：停止后 Claude 进程还在
+
+如果 `ps aux | grep -i '[c]laude'` 里同时看到：
+
+```text
+node tmp/run-claude-articles-run-many.mjs
+node /opt/homebrew/bin/claude-agent-acp
+.../claude --output-format stream-json ... --session-id ...
+```
+
+优先判断为测试方式问题：`node tmp/run-...mjs` 这个 launcher 没有被停止，所以它仍然在持有 `subagent_run_many` 请求。此时手动停止 Codex 当前回答只停止了模型输出，不等价于杀掉 shell 里已经启动的进程。
+
+清理顺序建议：
+
+1. 先杀 launcher 和 MCP Server 进程。
+2. 再杀每个 `claude-agent-acp` 的 process group。
+3. 最后按 Claude CLI 的 `--session-id` 或精确 PID 做兜底清理。
+
+新的实现已经在 MCP Server 收到 cancellation / stdio 关闭 / SIGTERM 时执行强制进程树清理；但如果 launcher 本身没有收到任何信号，并继续保持 stdio request，本服务无法凭空知道用户在 Host UI 中点了停止。
 
 ## 场景一：同步运行一个子代理
 

@@ -104,6 +104,8 @@ export interface ActiveSubagentTask {
   completedTtlTimer?: NodeJS.Timeout;
   /** 是否已经清理进程和锁。 */
   cleanedUp: boolean;
+  /** 正在进行的清理 promise，避免并发清理时提前返回。 */
+  cleanupPromise?: Promise<void>;
   /** 更新序号，用于 any_update 等待策略。 */
   updateSeq: number;
 }

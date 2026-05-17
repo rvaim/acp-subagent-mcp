@@ -307,6 +307,36 @@ export async function cancelActiveTask(active: ActiveSubagentTask, reason?: stri
 }
 
 /**
+ * 强制取消并立刻清理本地进程树。
+ *
+ * 与 cancelActiveTask 不同，本函数不等待 ACP adapter 对 session/cancel
+ * 作出响应，也不等待 currentTurnPromise 自然结束。它用于 MCP request
+ * cancellation、transport 断开和进程退出等兜底路径，目标是优先保证
+ * 本机不会留下继续运行的子代理进程。
+ */
+export async function forceCancelActiveTask(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies, reason?: string): Promise<"cancelled" | "already_terminal"> {
+  if (isTerminalTaskState(active.status) && active.cleanedUp) return "already_terminal";
+
+  if (!isTerminalTaskState(active.status)) {
+    active.status = "cancelling";
+    active.errors.push(makeSubagentError("cancelled", reason ? `任务已取消：${reason}` : "任务已取消", { recoverable: true }));
+    active.timeoutController?.abort("cancelled");
+    if (active.client && active.sessionId) {
+      void active.client.cancel(active.sessionId).catch(() => undefined);
+    }
+  }
+
+  await cleanupActiveTask(active, deps, true);
+
+  if (!isTerminalTaskState(active.status)) {
+    active.status = "cancelled";
+    active.completedAt = active.completedAt ?? new Date();
+  }
+  deps.registry.notify(active.taskId);
+  return "cancelled";
+}
+
+/**
  * 关闭任务和底层 session。可用于释放 keep_alive session。
  */
 export async function closeActiveTask(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies, force: boolean): Promise<void> {
@@ -315,8 +345,11 @@ export async function closeActiveTask(active: ActiveSubagentTask, deps: Subagent
   }
 
   if (!isFinishedTaskState(active.status) && force) {
-    await cancelActiveTask(active, "force close");
-    await active.currentTurnPromise?.catch(() => undefined);
+    await forceCancelActiveTask(active, deps, "force close");
+    active.status = "closed";
+    active.completedAt = active.completedAt ?? new Date();
+    deps.registry.notify(active.taskId);
+    return;
   }
 
   if (active.client && active.sessionId) {
@@ -337,10 +370,18 @@ export async function closeActiveTask(active: ActiveSubagentTask, deps: Subagent
  */
 export async function shutdownAllActiveTasks(deps: SubagentTaskRunnerDependencies, reason: string): Promise<void> {
   const tasks = deps.registry.list();
-  await Promise.allSettled(tasks.map((task) => closeActiveTask(task, deps, true).catch(async () => {
-    task.errors.push(makeSubagentError("cancelled", reason, { recoverable: true }));
-    await cleanupActiveTask(task, deps, true).catch(() => undefined);
-  })));
+  await Promise.allSettled(tasks.map(async (task) => {
+    try {
+      if (!isTerminalTaskState(task.status)) {
+        await forceCancelActiveTask(task, deps, reason);
+      } else {
+        await cleanupActiveTask(task, deps, true);
+      }
+    } catch {
+      task.errors.push(makeSubagentError("cancelled", reason, { recoverable: true }));
+      await cleanupActiveTask(task, deps, true).catch(() => undefined);
+    }
+  }));
 }
 
 /**
@@ -364,7 +405,7 @@ function bindRequestAbortToTask(active: ActiveSubagentTask, deps: SubagentTaskRu
 
   const onAbort = () => {
     const reason = requestAbortReason(signal, fallbackReason);
-    void cancelActiveTask(active, reason).catch(async () => {
+    void forceCancelActiveTask(active, deps, reason).catch(async () => {
       await cleanupActiveTask(active, deps, true).catch(() => undefined);
     });
   };
@@ -567,15 +608,23 @@ function launchPromptTurn(options: {
  * 清理子进程、timer 和并发锁。
  */
 async function cleanupActiveTask(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies, removeTimers: boolean): Promise<void> {
-  if (active.cleanedUp) return;
-  active.cleanedUp = true;
-  if (removeTimers) {
-    if (active.sessionTtlTimer) clearTimeout(active.sessionTtlTimer);
-    if (active.completedTtlTimer) clearTimeout(active.completedTtlTimer);
+  if (active.cleanupPromise) {
+    await active.cleanupPromise;
+    return;
   }
-  await active.client?.shutdown().catch(() => undefined);
-  active.releaseConcurrency?.();
-  deps.registry.notify(active.taskId);
+
+  active.cleanupPromise = (async () => {
+    if (removeTimers) {
+      if (active.sessionTtlTimer) clearTimeout(active.sessionTtlTimer);
+      if (active.completedTtlTimer) clearTimeout(active.completedTtlTimer);
+    }
+    await active.client?.shutdown().catch(() => undefined);
+    active.releaseConcurrency?.();
+    active.cleanedUp = true;
+    deps.registry.notify(active.taskId);
+  })();
+
+  await active.cleanupPromise;
 }
 
 /**

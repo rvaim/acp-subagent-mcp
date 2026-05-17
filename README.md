@@ -262,7 +262,7 @@ acp-subagent-mcp --print-default-config > agents.toml
 
 更多同步、异步、批量、取消、多轮和日志场景见 [doc/usage.md](doc/usage.md)，完整工具参数见 [doc/api.md](doc/api.md)。
 
-取消语义有一个重要前提：MCP Host 必须把用户停止当前回答传播为正在执行的 MCP request cancellation。本服务收到该信号后会执行 best-effort ACP cancel，并继续强制清理本地进程树。不要用主 agent 通过 shell 写出的临时 Node harness 来代表真实 MCP cancellation；这种脚本需要自己处理 `SIGINT` / `SIGTERM` 和 `AbortSignal`。
+取消语义有一个重要前提：MCP Host 必须把用户停止当前回答传播为正在执行的 MCP request cancellation。本服务收到该信号后会执行 best-effort ACP cancel，并继续强制清理本地进程树。不要用主 agent 通过 shell 写出的临时 Node harness 来代表真实 MCP cancellation；只要 `node tmp/run-xxx.mjs` 仍在进程表里，它就仍然持有请求，MCP Server 不会认为该请求已取消。
 
 ## 本地开发
 

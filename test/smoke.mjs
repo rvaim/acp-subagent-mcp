@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,8 @@ const tmp = await mkdtemp(path.join(os.tmpdir(), 'acp-subagent-smoke-'));
 const configPath = path.join(tmp, 'agents.toml');
 const mockAgent = path.join(root, 'dist/test/fixtures/mock-acp-agent.js');
 const stubbornAgent = path.join(root, 'dist/test/fixtures/stubborn-acp-agent.js');
+const spawnerAgent = path.join(root, 'dist/test/fixtures/spawner-acp-agent.js');
+const spawnerPidFile = path.join(tmp, 'spawner-child.pid');
 await writeFile(configPath, `
 [defaults]
 timeout_secs = 20
@@ -78,6 +80,15 @@ description = "stubborn"
 command = "node"
 args = ["${stubbornAgent}"]
 capabilities = ["analysis"]
+
+[agents.spawner]
+description = "spawner"
+command = "node"
+args = ["${spawnerAgent}"]
+capabilities = ["analysis"]
+
+[agents.spawner.env]
+SPAWNER_PID_FILE = "${spawnerPidFile}"
 `);
 
 const config = await loadConfig(configPath);
@@ -116,6 +127,29 @@ const stubbornCancelledRun = await stubbornRunPromise;
 assert(stubbornCancelledRun.status === 'cancelled', '忽略 ACP cancel 的子代理也应被 request signal 取消');
 assert(Date.now() - stubbornCancelStartedAt < 5000, '忽略 ACP cancel 时不应长时间卡住取消流程');
 assert(stubbornCancelDeps.registry.list().every((task) => task.cleanedUp), '忽略 ACP cancel 的子代理进程应被清理');
+
+const spawnerCancelController = new AbortController();
+const spawnerCancelDeps = { config, concurrency: new ConcurrencyManager(), registry: new TaskRegistry(), requestSignal: spawnerCancelController.signal };
+const spawnerRunPromise = handleSubagentRun({
+  agent_type: 'spawner',
+  cwd: tmp,
+  timeout_secs: 20,
+  task: { title: '孙进程清理测试', goal: '这个 agent 会启动一个单独 process group 的孙进程。' }
+}, spawnerCancelDeps);
+await waitUntil(async () => {
+  try {
+    const pid = Number(await readFile(spawnerPidFile, 'utf8'));
+    return Number.isFinite(pid) && isPidAlive(pid);
+  } catch {
+    return false;
+  }
+});
+const spawnedChildPid = Number(await readFile(spawnerPidFile, 'utf8'));
+spawnerCancelController.abort(new Error('manual stop spawner agent'));
+const spawnerCancelledRun = await spawnerRunPromise;
+assert(spawnerCancelledRun.status === 'cancelled', '带孙进程的子代理应被取消');
+await waitUntil(() => !isPidAlive(spawnedChildPid), 5000);
+assert(spawnerCancelDeps.registry.list().every((task) => task.cleanedUp), '带孙进程的子代理进程树应清理');
 
 const waitCancelDeps = { config, concurrency: new ConcurrencyManager(), registry: new TaskRegistry() };
 const slowStart = await handleSubagentStart({
@@ -206,8 +240,17 @@ function assert(condition, message) {
 async function waitUntil(predicate, timeoutMs = 5000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error('等待条件超时');
+}
+
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

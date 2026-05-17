@@ -1,6 +1,6 @@
 import type { SubagentWaitInput, SubagentWaitOutput } from "../task/types.js";
 import type { SubagentTaskRunnerDependencies } from "../runtime/taskRunner.js";
-import { cancelActiveTask } from "../runtime/taskRunner.js";
+import { forceCancelActiveTask } from "../runtime/taskRunner.js";
 import { SubagentRuntimeError } from "../runtime/errors.js";
 import { isFinishedTaskState } from "../runtime/taskRegistry.js";
 import { subagentWaitInputSchema } from "./schemas.js";
@@ -27,7 +27,7 @@ export async function handleSubagentWait(rawInput: unknown, deps: SubagentTaskRu
     if (conditionMet || elapsed >= timeoutMs) {
       if (!conditionMet && input.on_timeout === "cancel_pending") {
         for (const task of snapshot) {
-          if (!isFinishedTaskState(task.status)) await cancelActiveTask(task, "subagent_wait timeout").catch(() => undefined);
+          if (!isFinishedTaskState(task.status)) await forceCancelActiveTask(task, deps, "subagent_wait timeout").catch(() => undefined);
         }
       }
       return buildWaitOutput(input, deps, Date.now() - startedAt, !conditionMet && elapsed >= timeoutMs);
@@ -98,7 +98,7 @@ function throwIfAbortedAndCancel(input: SubagentWaitInput, deps: SubagentTaskRun
 async function cancelWaitTasks(input: SubagentWaitInput, deps: SubagentTaskRunnerDependencies, reason: string): Promise<void> {
   await Promise.allSettled(input.task_ids.map(async (taskId) => {
     const task = deps.registry.get(taskId);
-    if (task && !isFinishedTaskState(task.status)) await cancelActiveTask(task, reason).catch(() => undefined);
+    if (task && !isFinishedTaskState(task.status)) await forceCancelActiveTask(task, deps, reason).catch(() => undefined);
   }));
 }
 

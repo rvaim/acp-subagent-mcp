@@ -417,8 +417,8 @@ file_mode = "0600"
 - 子进程默认 `env_policy=all`，会继承 MCP Server 进程可见的全部环境变量；生产环境可改用 `allowlist`。
 - 日志默认脱敏。
 - 超时、显式 `subagent_cancel`、`subagent_close(force=true)` 都会清理子进程树。
-- Host 手动停止正在执行的 `subagent_run` 或 `subagent_wait` 时，MCP SDK 提供的 request `AbortSignal` 会被级联到 ACP `session/cancel`，随后执行 SIGTERM/SIGKILL 清理，避免子代理后台残留。
-- MCP transport 关闭、Node 收到 SIGINT/SIGTERM、进程即将退出时，会兜底关闭所有活跃子代理。
+- Host 手动停止正在执行的 `subagent_run`、`subagent_run_many` 或 `subagent_wait` 时，MCP SDK 提供的 request `AbortSignal` 会触发 `forceCancelActiveTask()`：ACP `session/cancel` 只作为 best-effort，同时本地立即进入进程树清理。
+- MCP transport 关闭、Node 收到 SIGINT/SIGTERM、进程即将退出时，会兜底关闭所有活跃子代理；Unix 下会同时清理 adapter 进程树、adapter process group 和可见孙进程自己的 process group。
 
 ## 已知边界
 
