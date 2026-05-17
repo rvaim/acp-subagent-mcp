@@ -37,7 +37,7 @@ install_hint = "请确认 claude-agent-acp 已在 PATH，或用 ACP_SUBAGENT_DEF
 [defaults]
 default_agent = "claude"
 timeout_secs = 600
-inactivity_timeout_secs = 120
+inactivity_timeout_secs = 15
 max_depth = 2
 max_prompt_chars = 120000
 max_inline_file_chars = 30000
@@ -45,9 +45,17 @@ log_dir = ".subagents/runs"
 session_ttl_secs = 1800
 completed_session_ttl_secs = 600
 max_active_sessions = 4
-acp_cancel_grace_ms = 3000
-process_kill_grace_ms = 2000
+mcp_request_heartbeat_ms = 1000
+acp_cancel_grace_ms = 500
+process_kill_grace_ms = 500
 ```
+
+与“用户停止会话后尽快关闭子代理”相关的默认值：
+
+- `mcp_request_heartbeat_ms = 1000`：当 MCP Host 在 tool request 中提供 `progressToken` 时，服务端每 1 秒发送一次 MCP progress heartbeat。它可以让 Host 持续知道这个 tool call 还在运行，也能在 transport 已断开但 SDK 尚未完成 close 回调时更早触发本地 abort。设置为 `0` 可关闭。
+- `acp_cancel_grace_ms = 500`：收到 request cancellation 后，ACP `session/cancel` 只给 adapter 500ms 的正常响应窗口。
+- `process_kill_grace_ms = 500`：本地进程树收到 `SIGTERM` 后只等待 500ms，随后 `SIGKILL` 兜底。
+- `inactivity_timeout_secs = 15`：如果某个 Host 没有及时发送 MCP cancellation，也没有关闭 stdio transport，服务端无法立即知道用户点了停止；此时无 ACP 协议层活动 15 秒后会自动取消并清理。
 
 默认并发：
 
@@ -201,7 +209,10 @@ require_absolute_agent_command = false
 | `ACP_SUBAGENT_ALLOW_NETWORK` | 策略声明：是否允许网络 | `false` |
 | `ACP_SUBAGENT_REQUIRE_ABSOLUTE_AGENT_COMMAND` | agent command 是否必须绝对路径 | `false` |
 | `ACP_SUBAGENT_TIMEOUT_SECS` | 默认任务超时 | `600` |
-| `ACP_SUBAGENT_INACTIVITY_TIMEOUT_SECS` | 默认无活动超时 | `120` |
+| `ACP_SUBAGENT_INACTIVITY_TIMEOUT_SECS` | 默认无活动超时；Host 未及时发送 cancellation 时的快速兜底 | `15` |
+| `ACP_SUBAGENT_MCP_REQUEST_HEARTBEAT_MS` | 长 tool call 的 MCP progress heartbeat 间隔；`0` 表示关闭 | `1000` |
+| `ACP_SUBAGENT_ACP_CANCEL_GRACE_MS` | 收到取消后等待 ACP cancel / SIGTERM 生效的宽限时间 | `500` |
+| `ACP_SUBAGENT_PROCESS_KILL_GRACE_MS` | 发送 `SIGKILL` 后等待进程退出的兜底时间 | `500` |
 | `ACP_SUBAGENT_MAX_ACTIVE_SESSIONS` | 最大活跃 session 数 | `4` |
 | `ACP_SUBAGENT_MAX_PARALLEL_TASKS` | 最大并发任务数 | `4` |
 | `ACP_SUBAGENT_LOG_DIR` | 日志目录 | `.subagents/runs` |
@@ -418,6 +429,7 @@ file_mode = "0600"
 - 日志默认脱敏。
 - 超时、显式 `subagent_cancel`、`subagent_close(force=true)` 都会清理子进程树。
 - Host 手动停止正在执行的 `subagent_run`、`subagent_run_many` 或 `subagent_wait` 时，MCP SDK 提供的 request `AbortSignal` 会触发 `forceCancelActiveTask()`：ACP `session/cancel` 只作为 best-effort，同时本地立即进入进程树清理。
+- 长时间运行的 MCP tool call 会在 Host 提供 `progressToken` 时发送 progress heartbeat；这不是用来判断子代理是否活着的心跳，而是 request 级保活/探测，用来帮助 Host 更快传播 cancellation 或暴露 transport 断开。
 - MCP transport 关闭、Node 收到 SIGINT/SIGTERM、进程即将退出时，会兜底关闭所有活跃子代理；Unix 下会同时清理 adapter 进程树、adapter process group 和可见孙进程自己的 process group。
 
 ## 已知边界

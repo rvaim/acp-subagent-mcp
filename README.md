@@ -1,4 +1,4 @@
-# @rvaim/acp-subagent-mcp
+# acp-subagent-mcp
 
 通用 ACP 子代理 MCP Server。主 agent 通过 MCP tools 派发任务，本服务在内部拉起支持 ACP 的子代理，负责会话、并发、多轮、取消、超时、日志、安全校验、Skill 桥接和低 token 结果返回。
 
@@ -39,18 +39,24 @@
 - 默认禁止动态 `mcp_servers`，只能引用配置或环境变量中受信的 profile。
 - 默认 `execute=deny`，不向 ACP agent 声明 terminal capability。
 
+## 停止会话时的默认清理策略
+
+推荐把本服务配置成真实 MCP Server 后，直接调用 `subagent_run_many` 或在 `subagent_start_many` 后立刻进入 `subagent_wait`。当 Host 把用户“停止当前响应”传播为 MCP request cancellation 时，本服务会立即进入强制清理路径：ACP `session/cancel` 只作为 best-effort，默认最多等待 500ms，然后清理本地进程树，必要时使用 `SIGKILL`。
+
+如果 Host 只停止模型文本输出、没有取消 MCP request，也没有关闭 stdio transport，MCP Server 无法立刻知道用户点击了停止。为了避免这种情况下子代理继续运行很久，默认 `inactivity_timeout_secs` 已下调为 15 秒，作为无 ACP 协议层活动时的兜底清理。
+
 ## 安装
 
 ### 方式一：直接用 npx
 
 ```bash
-npx -y @rvaim/acp-subagent-mcp
+npx -y acp-subagent-mcp
 ```
 
 ### 方式二：全局安装
 
 ```bash
-npm install -g @rvaim/acp-subagent-mcp
+npm install -g acp-subagent-mcp
 acp-subagent-mcp
 ```
 
@@ -210,7 +216,10 @@ npx -y @rvaim/acp-subagent-mcp --print-generic-mcp-config
 | `ACP_SUBAGENT_WORKSPACE_ROOTS` | 可选；严格限制子代理可使用的工作区根目录 | 空，表示自动信任本次 `cwd` |
 | `ACP_SUBAGENT_AUTO_WORKSPACE_ROOTS` | 未设置严格根目录时，是否自动信任本次 `cwd` | `true` |
 | `ACP_SUBAGENT_TIMEOUT_SECS` | 默认任务超时 | `600` |
-| `ACP_SUBAGENT_INACTIVITY_TIMEOUT_SECS` | 默认无活动超时 | `120` |
+| `ACP_SUBAGENT_INACTIVITY_TIMEOUT_SECS` | 默认无活动超时；Host 未及时发送 cancellation 时的快速兜底 | `15` |
+| `ACP_SUBAGENT_MCP_REQUEST_HEARTBEAT_MS` | 长 tool call 的 MCP progress heartbeat 间隔；`0` 表示关闭 | `1000` |
+| `ACP_SUBAGENT_ACP_CANCEL_GRACE_MS` | 收到取消后等待 ACP cancel / SIGTERM 生效的宽限时间 | `500` |
+| `ACP_SUBAGENT_PROCESS_KILL_GRACE_MS` | 发送 `SIGKILL` 后等待进程退出的兜底时间 | `500` |
 | `ACP_SUBAGENT_LOG_DIR` | 日志目录 | `.subagents/runs` |
 | `ACP_SUBAGENT_SKILL_MODE` | Skill 注入模式：`off/list/inline` | `list` |
 | `ACP_SUBAGENT_AGENTS_JSON` | 用 JSON 添加或覆盖 agent 配置 | 空 |
@@ -233,7 +242,7 @@ acp-subagent-mcp --print-default-config > agents.toml
   "mcpServers": {
     "acp-subagent": {
       "command": "npx",
-      "args": ["-y", "@rvaim/acp-subagent-mcp", "--config", "/absolute/path/to/agents.toml"]
+      "args": ["-y", "acp-subagent-mcp", "--config", "/absolute/path/to/agents.toml"]
     }
   }
 }
@@ -262,7 +271,9 @@ acp-subagent-mcp --print-default-config > agents.toml
 
 更多同步、异步、批量、取消、多轮和日志场景见 [doc/usage.md](doc/usage.md)，完整工具参数见 [doc/api.md](doc/api.md)。
 
-取消语义有一个重要前提：MCP Host 必须把用户停止当前回答传播为正在执行的 MCP request cancellation。本服务收到该信号后会执行 best-effort ACP cancel，并继续强制清理本地进程树。不要用主 agent 通过 shell 写出的临时 Node harness 来代表真实 MCP cancellation；只要 `node tmp/run-xxx.mjs` 仍在进程表里，它就仍然持有请求，MCP Server 不会认为该请求已取消。
+取消语义有一个重要前提：MCP Host 必须把用户停止当前回答传播为正在执行的 MCP request cancellation。本服务收到该信号后会执行 best-effort ACP cancel，并立即进入本地进程树强制清理；默认只给 ACP adapter `500ms` 响应 cancel，再给进程树 `500ms` 处理 `SIGTERM`，随后使用 `SIGKILL` 兜底。长 tool call 默认还会在 Host 提供 `progressToken` 时每 `1000ms` 发送 MCP progress heartbeat，帮助 Host 更快感知 request 仍在运行并传播 cancellation。不要用主 agent 通过 shell 写出的临时 Node harness 来代表真实 MCP cancellation；只要 `node tmp/run-xxx.mjs` 仍在进程表里，它就仍然持有请求，MCP Server 不会认为该请求已取消。
+
+如果某个 Host 只停止模型文本输出、没有发送 MCP request cancellation，也没有关闭 stdio transport，本服务无法立即知道用户点了停止。新版会在 Host 提供 `progressToken` 时每秒发送一次 MCP progress heartbeat；这不是用来杀子代理的心跳，而是让长 tool call 保持可见，并在 transport 已断开但 SDK 尚未触发 close 时更早发现发送失败。为减少没有 cancellation 时的残留时间，默认 `inactivity_timeout_secs` 已设为 `15` 秒：长时间没有 ACP 协议层活动时会自动取消并清理子代理。`result.json` 中如果看到 `status=timeout` 且 `code=inactivity_timeout`，说明走的是这个兜底路径；如果看到 `status=cancelled`，说明收到了真实 cancellation。
 
 ## 本地开发
 

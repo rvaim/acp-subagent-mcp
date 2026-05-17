@@ -34,7 +34,7 @@ const defaultClaudePermissionPolicy: PermissionPolicy = {
 const defaultDefaults: DefaultsConfig = {
   default_agent: "claude",
   timeout_secs: 600,
-  inactivity_timeout_secs: 120,
+  inactivity_timeout_secs: 15,
   max_depth: 2,
   max_prompt_chars: 120000,
   max_inline_file_chars: 30000,
@@ -42,8 +42,9 @@ const defaultDefaults: DefaultsConfig = {
   session_ttl_secs: 1800,
   completed_session_ttl_secs: 600,
   max_active_sessions: 4,
-  acp_cancel_grace_ms: 3000,
-  process_kill_grace_ms: 2000
+  mcp_request_heartbeat_ms: 1000,
+  acp_cancel_grace_ms: 500,
+  process_kill_grace_ms: 500
 };
 
 /** 默认安全配置。 */
@@ -162,6 +163,7 @@ const appConfigSchema = z.object({
     session_ttl_secs: z.number().int().positive().default(defaultDefaults.session_ttl_secs),
     completed_session_ttl_secs: z.number().int().positive().default(defaultDefaults.completed_session_ttl_secs),
     max_active_sessions: z.number().int().positive().default(defaultDefaults.max_active_sessions),
+    mcp_request_heartbeat_ms: z.number().int().min(0).default(defaultDefaults.mcp_request_heartbeat_ms),
     acp_cancel_grace_ms: z.number().int().positive().default(defaultDefaults.acp_cancel_grace_ms),
     process_kill_grace_ms: z.number().int().positive().default(defaultDefaults.process_kill_grace_ms)
   }).default(defaultDefaults),
@@ -405,6 +407,9 @@ function applyDefaultEnvOverrides(config: DefaultsConfig): DefaultsConfig {
     timeout_secs: parsePositiveIntEnv("ACP_SUBAGENT_TIMEOUT_SECS", config.timeout_secs),
     inactivity_timeout_secs: parsePositiveIntEnv("ACP_SUBAGENT_INACTIVITY_TIMEOUT_SECS", config.inactivity_timeout_secs),
     max_active_sessions: parsePositiveIntEnv("ACP_SUBAGENT_MAX_ACTIVE_SESSIONS", config.max_active_sessions),
+    mcp_request_heartbeat_ms: parseNonNegativeIntEnv("ACP_SUBAGENT_MCP_REQUEST_HEARTBEAT_MS", config.mcp_request_heartbeat_ms),
+    acp_cancel_grace_ms: parsePositiveIntEnv("ACP_SUBAGENT_ACP_CANCEL_GRACE_MS", config.acp_cancel_grace_ms),
+    process_kill_grace_ms: parsePositiveIntEnv("ACP_SUBAGENT_PROCESS_KILL_GRACE_MS", config.process_kill_grace_ms),
     log_dir: process.env.ACP_SUBAGENT_LOG_DIR?.trim() || config.log_dir
   };
 }
@@ -505,6 +510,16 @@ function parsePositiveIntEnv(name: string, fallback: number): number {
 }
 
 /**
+ * 解析非负整数环境变量。0 用于显式关闭某些周期性机制。
+ */
+function parseNonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+/**
  * 解析字符串列表环境变量。支持 JSON array、逗号分隔和平台 path delimiter。
  */
 function parseListEnv(name: string, fallback: string[]): string[] {
@@ -601,7 +616,7 @@ export function renderDefaultConfigToml(): string {
 [defaults]
 default_agent = "claude"
 timeout_secs = 600
-inactivity_timeout_secs = 120
+inactivity_timeout_secs = 15
 max_depth = 2
 max_prompt_chars = 120000
 max_inline_file_chars = 30000
@@ -609,8 +624,9 @@ log_dir = ".subagents/runs"
 session_ttl_secs = 1800
 completed_session_ttl_secs = 600
 max_active_sessions = 4
-acp_cancel_grace_ms = 3000
-process_kill_grace_ms = 2000
+mcp_request_heartbeat_ms = 1000
+acp_cancel_grace_ms = 500
+process_kill_grace_ms = 500
 
 [security]
 # 默认不需要设置 allowed_cwd_roots；MCP tool 传入的 cwd 会被视为当前工作区。
@@ -733,7 +749,7 @@ export function renderGenericMcpConfigJson(): string {
       "acp-subagent": {
         type: "stdio",
         command: "npx",
-        args: ["-y", "@rvaim/acp-subagent-mcp"],
+        args: ["-y", "acp-subagent-mcp"],
         env: {
           ACP_SUBAGENT_DEFAULT_AGENT: "claude",
           ACP_SUBAGENT_ENV_POLICY: "all",

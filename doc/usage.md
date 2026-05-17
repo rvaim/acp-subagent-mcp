@@ -2,7 +2,11 @@
 
 本项目提供的是 MCP tool 层面的子代理编排 API。主 agent 不需要直接管理子进程，也不需要直接读 ACP 协议；只需要选择合适的工具组合。
 
-取消语义只对“真实 MCP tool call”成立：MCP Host 必须把用户停止当前响应转换成正在执行的 tool request cancellation。不要用主 agent 的 shell / exec 临时写一个 Node harness 来测试“停止对话自动杀子代理”；即使该 harness 通过 stdio 调用本 MCP Server，只要 `node tmp/run-xxx.mjs` 还在进程表里，它就仍然持有 MCP request，服务端看到的是“请求仍在运行”。这种 harness 必须自己处理 `SIGINT` / `SIGTERM`，并在退出时关闭 MCP transport 或显式杀掉进程树。
+取消语义只对“真实 MCP tool call”成立：MCP Host 必须把用户停止当前响应转换成正在执行的 tool request cancellation。收到 cancellation 或 stdio transport 关闭后，本服务会立即进入强制清理路径：ACP `session/cancel` 只是 best-effort，默认最多等 `500ms`，随后清理本地进程树，`SIGTERM` 默认也只宽限 `500ms`，再用 `SIGKILL` 兜底。
+
+不要用主 agent 的 shell / exec 临时写一个 Node harness 来测试“停止对话自动杀子代理”；即使该 harness 通过 stdio 调用本 MCP Server，只要 `node tmp/run-xxx.mjs` 还在进程表里，它就仍然持有 MCP request，服务端看到的是“请求仍在运行”。这种 harness 必须自己处理 `SIGINT` / `SIGTERM`，并在退出时关闭 MCP transport 或显式杀掉进程树。
+
+如果 Host 只停止模型文本输出、没有发送 MCP cancellation，也没有关闭 stdio transport，本服务无法立刻感知用户点击了停止。为了避免这种场景下继续运行很久，默认 `inactivity_timeout_secs` 是 `15` 秒；超过该时间没有 ACP 协议层活动时，会按 `inactivity_timeout` 取消并清理子代理。
 
 ## 工具选择速查
 
@@ -37,7 +41,7 @@ node /opt/homebrew/bin/claude-agent-acp
 2. 再杀每个 `claude-agent-acp` 的 process group。
 3. 最后按 Claude CLI 的 `--session-id` 或精确 PID 做兜底清理。
 
-新的实现已经在 MCP Server 收到 cancellation / stdio 关闭 / SIGTERM 时执行强制进程树清理；但如果 launcher 本身没有收到任何信号，并继续保持 stdio request，本服务无法凭空知道用户在 Host UI 中点了停止。
+新的实现已经在 MCP Server 收到 cancellation / stdio 关闭 / `SIGINT` / `SIGTERM` 时执行强制进程树清理；但如果 launcher 本身没有收到任何信号，并继续保持 stdio request，本服务无法凭空知道用户在 Host UI 中点了停止。此时默认 15 秒无活动超时会作为兜底，`result.json` 会显示 `status=timeout`、`code=inactivity_timeout`。如果是正常 request cancellation，`result.json` 应显示 `status=cancelled`。
 
 ## 场景一：同步运行一个子代理
 

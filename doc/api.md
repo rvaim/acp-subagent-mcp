@@ -240,7 +240,7 @@
   "cwd": "/Users/you/workspace/app",
   "mode": "review",
   "timeout_secs": 600,
-  "inactivity_timeout_secs": 120,
+  "inactivity_timeout_secs": 15,
   "mcp_server_profiles": ["filesystem"],
   "skills": { "mode": "list" },
   "output": { "mode": "compact", "max_result_chars": 4000 },
@@ -257,7 +257,7 @@
 
 ### 取消语义
 
-`subagent_run` 会把当前 MCP request 的取消信号绑定到子代理任务。前提是 MCP Host 确实把用户停止当前响应传播为 request cancellation；满足该前提时，本服务会取消 ACP session，并继续清理本地进程树。
+`subagent_run` 会把当前 MCP request 的取消信号绑定到子代理任务。前提是 MCP Host 确实把用户停止当前响应传播为 request cancellation；满足该前提时，本服务会立即进入强制清理路径：ACP `session/cancel` 最多默认等待 500ms，随后清理本地进程树。如果 Host 没有发送 cancellation，默认 15 秒 `inactivity_timeout_secs` 会作为兜底。
 
 ### 使用场景
 
@@ -344,7 +344,7 @@ subagent_start_many -> subagent_wait
 
 ### 取消语义
 
-`subagent_run_many` 会把当前 MCP request cancellation 绑定到本次启动的所有任务。前提仍然是 MCP Host 确实发送 request cancellation。收到取消后，本服务会对所有仍在运行任务执行 best-effort ACP `session/cancel`，然后继续本地强制清理进程树。
+`subagent_run_many` 会把当前 MCP request cancellation 绑定到本次启动的所有任务。前提仍然是 MCP Host 确实发送 request cancellation。收到取消后，本服务会对所有仍在运行任务执行 best-effort ACP `session/cancel`，默认最多等待 500ms，然后继续本地强制清理进程树。如果 Host 未发送 cancellation，则默认 15 秒无 ACP 协议层活动会触发 `inactivity_timeout` 兜底清理。
 
 ### 使用场景
 
@@ -630,7 +630,7 @@ subagent_start_many -> subagent_wait
   ],
   "mode": "fix",
   "timeout_secs": 600,
-  "inactivity_timeout_secs": 120,
+  "inactivity_timeout_secs": 15,
   "skills": { "mode": "list" },
   "output": { "mode": "compact" }
 }
@@ -860,7 +860,7 @@ subagent_start_many -> subagent_wait
 | `acp_auth_required` | ACP agent 要求认证但当前未配置认证流程。 |
 | `permission_denied` | 权限策略拒绝。 |
 | `timeout` | 任务 wall-clock 超时。 |
-| `inactivity_timeout` | 长时间无有效活动。 |
+| `inactivity_timeout` | 长时间无 ACP 协议层活动；默认 15 秒，也用于 Host 未发送 cancellation 时的快速兜底。 |
 | `cancelled` | 任务被取消。 |
 | `process_exit_nonzero` | 子进程非零退出。 |
 | `result_parse_failed` | 结果解析失败。 |

@@ -26,6 +26,9 @@ async function main(): Promise<void> {
       "  ACP_SUBAGENT_DEFAULT_AGENT=claude",
       "  ACP_SUBAGENT_ENV_POLICY=all          # all | allowlist | none，默认 all",
       "  ACP_SUBAGENT_ENV_ALLOWLIST=ANTHROPIC_*,PATH,HOME  # policy=allowlist 时使用",
+      "  ACP_SUBAGENT_INACTIVITY_TIMEOUT_SECS=15            # Host 未传 cancellation 时的快速兜底",
+      "  ACP_SUBAGENT_ACP_CANCEL_GRACE_MS=500               # 取消后等待 ACP adapter 的时间",
+      "  ACP_SUBAGENT_PROCESS_KILL_GRACE_MS=500             # SIGTERM 后等待 SIGKILL 的时间",
       "  ACP_SUBAGENT_WORKSPACE_ROOTS=/path/a,/path/b       # 可选；生产环境严格限制工作区",
       ""
     ].join("\n"));

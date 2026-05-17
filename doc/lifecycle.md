@@ -19,6 +19,8 @@
 
 “用户手动停止主 agent 后子代理自动停止”有一个协议前提：**当前 MCP Host 必须向正在执行的 MCP tool call 发送 cancellation，或者关闭 MCP stdio transport / 结束 MCP Server 进程**。本服务只能响应已经到达 MCP Server 的信号，不能凭空感知某个 Host UI 中的“停止生成”按钮。
 
+收到真实 cancellation / transport close / `SIGINT` / `SIGTERM` 时，默认策略是快速清理：服务端立即进入 `forceCancelActiveTask()`，ACP `session/cancel` 只等 `500ms`，本地进程树收到 `SIGTERM` 后也只等 `500ms`，随后发 `SIGKILL`。长 tool call 还会在 Host 提供 `progressToken` 时每 `1000ms` 发送一次 MCP progress heartbeat，帮助 Host 持续感知请求仍在运行，并在 transport 断开时更早触发本地 abort。如果 Host 没有发 cancellation，也没有关闭 transport，则默认 `inactivity_timeout_secs=15` 作为兜底；这时结果会是 `timeout / inactivity_timeout`，不是 `cancelled`。
+
 尤其要区分两种测试方式：
 
 - 真实 MCP 调用：主 agent 调用 `subagent_run`、`subagent_run_many` 或 `subagent_wait`，Host 把停止动作映射为 MCP request cancellation，此时本服务会级联取消并强制清理进程树。
@@ -32,7 +34,7 @@
 
 排查时先看是否仍有 `node tmp/run-xxx.mjs`。如果它还活着，说明当前测试脚本还在继续持有请求；应该先停止这个 launcher，再清理 adapter / Claude 进程。真正的 MCP tool 取消测试不应该通过 shell launcher 完成，而应该把本 MCP Server 配到 Codex/Claude Desktop 等 Host，让主 agent 直接调用 `subagent_run_many` 这个 MCP tool。
 
-本版本的取消流程是“ACP cancel best-effort + 本地强制清理”：即使 ACP adapter 不响应 `session/cancel`，本服务也不会一直等它，而会继续关闭 stdio，并在 Unix 下同时扫描 adapter 进程树、adapter process group 以及孙进程自己的 process group，先发 `SIGTERM`，宽限后再 `SIGKILL`。
+本版本的取消流程是“ACP cancel best-effort + 本地强制清理”：即使 ACP adapter 不响应 `session/cancel`，本服务也不会一直等它，而会继续关闭 stdio，并在 Unix 下同时扫描 adapter 进程树、adapter process group 以及孙进程自己的 process group，先发 `SIGTERM`，默认 500ms 宽限后再 `SIGKILL`。新增的 progress heartbeat 是 MCP request 级机制，不是子代理存活检测；`inactivity_timeout_secs` 仍是在 Host 没有传来取消信号时的安全兜底。
 
 ## 单个子代理启动是同步的吗？
 
@@ -215,11 +217,12 @@ MCP Server 内部 GenericAcpClient
 | 机制 | 触发方式 | 对子代理做什么 | 适合场景 |
 |---|---|---|---|
 | request cancellation | 用户停止当前 tool call / MCP SDK abort signal | 对绑定任务调用 `forceCancelActiveTask()`，不等待 ACP cancel 自然完成 | 让用户手动停止主 agent 时同步停止子代理。 |
+| MCP request heartbeat | 长 tool call 且 Host 提供 `progressToken` | 每隔 `mcp_request_heartbeat_ms` 发送一次 progress；发送失败则本地 abort | 帮助 Host 更快处理长请求取消和 transport 断开。 |
 | `subagent_cancel` | 主 agent 显式调用 | ACP `session/cancel`，任务进入取消流程 | 主动取消后台任务。 |
 | `subagent_close(force=false)` | 主 agent 显式调用 | 只允许关闭已完成任务/session | 释放 `keep_alive` session。 |
 | `subagent_close(force=true)` | 主 agent 显式调用 | 先取消运行中任务，再关闭并清理 | 强制释放资源。 |
 | `timeout_secs` | wall-clock 到期 | ACP cancel + 清理 | 防止单个任务无限运行。 |
-| `inactivity_timeout_secs` | 长时间无活动 | ACP cancel + 清理 | 防止 agent 卡死或无输出。 |
+| `inactivity_timeout_secs` | 长时间无 ACP 协议层活动，默认 15 秒 | ACP cancel + 清理 | 防止 agent 卡死；也作为 Host 未传 cancellation 时的快速兜底。 |
 | MCP Server shutdown | stdio 关闭 / SIGINT / SIGTERM / beforeExit | `shutdownAllActiveTasks()` 关闭全部活跃任务 | 进程级兜底清理。 |
 
 ## 推荐选择

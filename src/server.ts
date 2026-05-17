@@ -1,6 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, type ServerNotification, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { AppConfig } from "./config/types.js";
 import { ConcurrencyManager } from "./runtime/concurrency.js";
 import { TaskRegistry } from "./runtime/taskRegistry.js";
@@ -61,7 +61,8 @@ export async function startMcpServer(config: AppConfig): Promise<void> {
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
-    const requestDeps: SubagentTaskRunnerDependencies = { ...deps, requestSignal: extra.signal };
+    const requestScope = createRequestScope({ config, toolName: name, signal: extra.signal, meta: extra._meta, sendNotification: extra.sendNotification });
+    const requestDeps: SubagentTaskRunnerDependencies = { ...deps, requestSignal: requestScope.signal };
 
     try {
       if (name === "subagent_list") return toMcpResult(handleSubagentList(config));
@@ -80,12 +81,86 @@ export async function startMcpServer(config: AppConfig): Promise<void> {
       return toMcpError(new Error(`未知工具：${name}`));
     } catch (error) {
       return toMcpError(error);
+    } finally {
+      requestScope.dispose();
     }
   });
 
   installShutdownHooks(server, deps);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+interface RequestScopeOptions {
+  config: AppConfig;
+  toolName: string;
+  signal: AbortSignal;
+  meta?: { progressToken?: string | number };
+  sendNotification: (notification: ServerNotification) => Promise<void>;
+}
+
+interface RequestScope {
+  signal: AbortSignal;
+  dispose: () => void;
+}
+
+/**
+ * 为单次 MCP tool call 创建本地 request scope。
+ *
+ * 作用：
+ * 1. 转发 MCP SDK 提供的 request AbortSignal；
+ * 2. 如果 Host 在 request _meta 中提供 progressToken，则周期性发送 progress
+ *    heartbeat。这样一方面让 Host 知道长任务仍在运行，另一方面在 transport
+ *    已断开但 SDK onclose 尚未完成时，可以通过发送失败尽快触发本地 abort。
+ *
+ * 注意：heartbeat 不能凭空感知“Host UI 停止但没有发送 cancellation 且 transport
+ * 仍保持打开”的情况；这种 Host 行为仍由 inactivity_timeout_secs 兜底。
+ */
+function createRequestScope(options: RequestScopeOptions): RequestScope {
+  const controller = new AbortController();
+  let disposed = false;
+  let heartbeat: NodeJS.Timeout | undefined;
+
+  const abort = (reason: unknown) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+  const relayAbort = () => abort(options.signal.reason ?? new Error("MCP request cancelled"));
+
+  if (options.signal.aborted) {
+    relayAbort();
+  } else {
+    options.signal.addEventListener("abort", relayAbort, { once: true });
+  }
+
+  const heartbeatMs = options.config.defaults.mcp_request_heartbeat_ms;
+  const progressToken = options.meta?.progressToken;
+  if (heartbeatMs > 0 && progressToken !== undefined) {
+    let progress = 0;
+    heartbeat = setInterval(() => {
+      if (disposed || controller.signal.aborted) return;
+      progress += 1;
+      void options.sendNotification({
+        method: "notifications/progress",
+        params: {
+          progressToken,
+          progress,
+          message: `${options.toolName} running`
+        }
+      }).catch((error) => {
+        abort(error instanceof Error ? error : new Error(String(error)));
+      });
+    }, heartbeatMs);
+    heartbeat.unref?.();
+  }
+
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      disposed = true;
+      if (heartbeat) clearInterval(heartbeat);
+      options.signal.removeEventListener("abort", relayAbort);
+    }
+  };
 }
 
 /**
@@ -106,6 +181,17 @@ function installShutdownHooks(server: Server, deps: SubagentTaskRunnerDependenci
   server.onclose = () => {
     void shutdown("MCP transport 已关闭");
   };
+
+  // 某些 Host 在停止会话或关闭 MCP Server 时会先关闭 stdio，
+  // 但不一定能让 Server.onclose 及时触发。直接监听 stdin 的 EOF/close，
+  // 确保 transport 断开时活跃子代理尽快进入强制清理路径。
+  const shutdownOnStdinClose = () => {
+    void shutdown("MCP stdin 已关闭").finally(() => {
+      process.exit(0);
+    });
+  };
+  process.stdin.once("end", shutdownOnStdinClose);
+  process.stdin.once("close", shutdownOnStdinClose);
 
   process.once("SIGINT", () => {
     void shutdown("收到 SIGINT，关闭所有子代理").finally(() => process.exit(130));

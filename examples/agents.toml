@@ -5,7 +5,7 @@
 [defaults]
 default_agent = "claude"
 timeout_secs = 600
-inactivity_timeout_secs = 120
+inactivity_timeout_secs = 15
 max_depth = 2
 max_prompt_chars = 120000
 max_inline_file_chars = 30000
@@ -13,8 +13,9 @@ log_dir = ".subagents/runs"
 session_ttl_secs = 1800
 completed_session_ttl_secs = 600
 max_active_sessions = 4
-acp_cancel_grace_ms = 3000
-process_kill_grace_ms = 2000
+mcp_request_heartbeat_ms = 1000
+acp_cancel_grace_ms = 500
+process_kill_grace_ms = 500
 
 [security]
 # 默认不需要写死根目录；MCP tool 传入的 cwd 会被视为当前工作区。

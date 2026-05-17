@@ -78,11 +78,11 @@ export function spawnAgentProcess(options: {
 export async function terminateProcessTree(child: ChildProcessWithoutNullStreams, options: { sigtermGraceMs: number; sigkillGraceMs: number }): Promise<void> {
   try {
     if (process.platform === "win32") {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      await delay(options.sigtermGraceMs);
-      if (child.exitCode === null && child.signalCode === null) {
+      if (!hasChildExited(child)) child.kill("SIGTERM");
+      await waitForChildExit(child, options.sigtermGraceMs);
+      if (!hasChildExited(child)) {
         await taskkillProcessTree(child.pid);
-        await delay(options.sigkillGraceMs);
+        await waitForChildExit(child, options.sigkillGraceMs);
       }
       return;
     }
@@ -96,12 +96,12 @@ export async function terminateProcessTree(child: ChildProcessWithoutNullStreams
     // 3. ps 快照里能看到的所有后代 PID 和它们自己的 PGID。
     const targets = collectUnixKillTargets(pid);
     signalUnixKillTargets(targets, "SIGTERM");
-    await delay(options.sigtermGraceMs);
+    await waitForChildExit(child, options.sigtermGraceMs);
 
-    if (isUnixKillTargetsAlive(targets) || isUnixProcessTreeAlive(pid)) {
+    if (!hasChildExited(child) || isUnixKillTargetsAlive(targets) || isUnixProcessTreeAlive(pid)) {
       signalUnixKillTargets(targets, "SIGKILL");
       signalUnixProcessTree(pid, "SIGKILL");
-      await delay(options.sigkillGraceMs);
+      await waitForChildExit(child, options.sigkillGraceMs);
     }
   } finally {
     destroyChildStdio(child);
@@ -363,6 +363,32 @@ function getProcessGroupId(pid: number): number | undefined {
   if (output.status !== 0 || !output.stdout) return undefined;
   const pgid = Number(output.stdout.trim());
   return Number.isFinite(pgid) ? pgid : undefined;
+}
+
+
+/**
+ * 判断 ChildProcess 是否已经发出退出状态。
+ */
+function hasChildExited(child: ChildProcessWithoutNullStreams): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+/**
+ * 等待 child exit，最多等待指定毫秒。
+ */
+function waitForChildExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+  if (hasChildExited(child)) return Promise.resolve();
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout;
+    const done = () => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve();
+    };
+    const onExit = () => done();
+    timer = setTimeout(done, timeoutMs);
+    child.once("exit", onExit);
+  });
 }
 
 /**

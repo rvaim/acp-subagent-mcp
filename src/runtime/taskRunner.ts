@@ -320,6 +320,7 @@ export async function forceCancelActiveTask(active: ActiveSubagentTask, deps: Su
   if (!isTerminalTaskState(active.status)) {
     active.status = "cancelling";
     active.errors.push(makeSubagentError("cancelled", reason ? `任务已取消：${reason}` : "任务已取消", { recoverable: true }));
+    await active.logger?.appendEvent({ type: "force_cancel", reason: reason ?? "cancelled" }).catch(() => undefined);
     active.timeoutController?.abort("cancelled");
     if (active.client && active.sessionId) {
       void active.client.cancel(active.sessionId).catch(() => undefined);
@@ -590,11 +591,11 @@ function launchPromptTurn(options: {
       active.currentInactivityTimeoutMs = undefined;
       active.completedAt = new Date();
       active.currentTurnId = undefined;
+      deps.registry.notify(active.taskId);
 
       if (!active.keepAlive || active.status === "failed" || active.status === "timeout" || active.status === "cancelled") {
         await cleanupActiveTask(active, deps, true);
       } else {
-        deps.registry.notify(active.taskId);
         scheduleCompletedSessionTtl(active, deps);
       }
     }
