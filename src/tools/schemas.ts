@@ -63,6 +63,10 @@ const skillBridgeSchema = z.object({
   max_total_chars: z.number().int().min(200).max(100000).optional()
 }).strict();
 
+const conflictPolicySchema = z.enum(["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"]);
+const modeSchema = z.enum(["analyze", "review", "edit", "implement", "debug", "custom"]);
+const onTaskFailureSchema = z.enum(["keep_others_running", "cancel_all"]).default("keep_others_running");
+
 /** subagent_run 输入 zod schema。 */
 export const subagentRunInputSchema = z.object({
   agent_type: z.string().min(1).optional(),
@@ -70,10 +74,48 @@ export const subagentRunInputSchema = z.object({
   cwd: z.string().optional(),
   timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
   inactivity_timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
-  mode: z.enum(["analyze", "review", "edit", "implement", "debug", "custom"]).default("analyze"),
+  mode: modeSchema.default("analyze"),
   mcp_server_profiles: z.array(z.string()).max(16).optional(),
   skills: skillBridgeSchema.optional(),
-  output: outputOptionsSchema.optional()
+  output: outputOptionsSchema.optional(),
+  conflict_policy: conflictPolicySchema.optional()
+}).strict();
+
+/** subagent_run_many 输入 zod schema。 */
+export const subagentRunManyInputSchema = z.object({
+  tasks: z.array(subagentRunInputSchema.omit({ conflict_policy: true })).min(1).max(32),
+  conflict_policy: conflictPolicySchema.optional(),
+  on_task_failure: onTaskFailureSchema
+}).strict();
+
+/** subagent_revise 输入 zod schema。 */
+export const subagentReviseInputSchema = z.object({
+  task_id: z.string().min(1).optional(),
+  task: subagentTaskSchema.optional(),
+  previous_result: z.string().optional(),
+  correction: z.object({
+    reason: z.string().min(1),
+    rejected_result: z.string().optional(),
+    expected_change: z.string().optional()
+  }).strict(),
+  message: z.string().optional(),
+  additional_files: z.array(taskFileSchema).max(200).optional(),
+  cwd: z.string().optional(),
+  agent_type: z.string().min(1).optional(),
+  timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
+  inactivity_timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
+  mode: modeSchema.default("custom"),
+  mcp_server_profiles: z.array(z.string()).max(16).optional(),
+  skills: skillBridgeSchema.optional(),
+  output: outputOptionsSchema.optional(),
+  conflict_policy: conflictPolicySchema.optional()
+}).strict();
+
+/** subagent_revise_many 输入 zod schema。 */
+export const subagentReviseManyInputSchema = z.object({
+  revisions: z.array(subagentReviseInputSchema.omit({ conflict_policy: true })).min(1).max(32),
+  conflict_policy: conflictPolicySchema.optional(),
+  on_task_failure: onTaskFailureSchema
 }).strict();
 
 /** subagent_list 输入 zod schema。 */
@@ -85,97 +127,74 @@ export const subagentRunInputJsonSchema = {
   additionalProperties: false,
   required: ["task"],
   properties: {
-    agent_type: { type: "string", description: "可选；默认 claude 或环境变量指定的默认 agent" },
-    cwd: { type: "string", description: "可选；绝对工作目录。默认当前工作区；高级场景可用 ACP_SUBAGENT_WORKSPACE_ROOTS 限制" },
+    agent_type: { type: "string", description: "可选；默认使用服务端 default_agent" },
+    cwd: { type: "string", description: "可选；绝对工作目录。默认当前工作区；可用 ACP_SUBAGENT_WORKSPACE_ROOTS 限制" },
     mode: { type: "string", enum: ["analyze", "review", "edit", "implement", "debug", "custom"], default: "analyze" },
     timeout_secs: { type: "integer", minimum: 1 },
     inactivity_timeout_secs: { type: "integer", minimum: 1 },
-    mcp_server_profiles: { type: "array", items: { type: "string" }, description: "只允许引用 profile；禁止动态 command" },
-    skills: {
-      type: "object",
-      additionalProperties: false,
-      description: "父代理 Skill 桥接；默认只注入低 token 的 skill 清单。mode=inline 时仅内联 names 指定的 SKILL.md",
-      properties: {
-        mode: { type: "string", enum: ["off", "list", "inline"] },
-        names: { type: "array", items: { type: "string" } },
-        include_project: { type: "boolean" },
-        include_user: { type: "boolean" },
-        max_skill_chars: { type: "integer", minimum: 200, maximum: 50000 },
-        max_total_chars: { type: "integer", minimum: 200, maximum: 100000 }
-      }
-    },
-    output: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        mode: { type: "string", enum: ["compact", "standard", "full"], default: "compact" },
-        max_result_chars: { type: "integer", minimum: 200, maximum: 50000, default: 4000 },
-        max_findings: { type: "integer", minimum: 0, maximum: 100, default: 8 },
-        include_diagnostics: { type: "boolean", default: false },
-        include_structured: { type: "boolean", default: false }
-      }
-    },
-    task: {
-      type: "object",
-      additionalProperties: false,
-      required: ["title", "goal"],
-      properties: {
-        title: { type: "string" },
-        goal: { type: "string" },
-        background: { type: "string" },
-        instructions: { type: "array", items: { type: "string" } },
-        constraints: { type: "array", items: { type: "string" } },
-        success_criteria: { type: "array", items: { type: "string" } },
-        files: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["path", "role", "action"],
-            properties: {
-              path: { type: "string", description: "相对 cwd 的安全路径" },
-              role: { type: "string", enum: ["primary", "reference", "test", "config", "output", "unknown"] },
-              action: { type: "string", enum: ["read", "review", "edit", "create", "delete", "ignore"] },
-              description: { type: "string" },
-              content_mode: { type: "string", enum: ["path_only", "inline", "snippet"], default: "path_only" },
-              content: { type: "string" },
-              line_ranges: {
-                type: "array",
-                items: {
-                  type: "object",
-                  required: ["start", "end"],
-                  properties: { start: { type: "integer" }, end: { type: "integer" } }
-                }
-              }
-            }
-          }
-        },
-        expected_output: {
-          type: "object",
-          additionalProperties: true,
-          properties: {
-            format: { type: "string", enum: ["text", "markdown", "json", "patch", "structured"] }
-          }
-        },
-        parent_context: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            parent_agent: { type: "string" },
-            conversation_summary: { type: "string" },
-            previous_findings: { type: "array", items: { type: "string" } }
-          }
-        }
-      }
-    }
+    conflict_policy: { type: "string", enum: ["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"] },
+    mcp_server_profiles: { type: "array", items: { type: "string" }, description: "只允许引用服务端配置中的 profile；禁止动态 command" },
+    skills: skillOptionsJsonSchema(),
+    output: outputOptionsJsonSchema(),
+    task: taskJsonSchema()
   }
 } as const;
 
-/** subagent_list MCP JSON Schema。 */
-export const subagentListInputJsonSchema = {
+/** run_many 工具 JSON schema。 */
+export const subagentRunManyInputJsonSchema = {
   type: "object",
   additionalProperties: false,
-  properties: {}
+  required: ["tasks"],
+  properties: {
+    tasks: { type: "array", minItems: 1, maxItems: 32, items: omitProperty(subagentRunInputJsonSchema, "conflict_policy") },
+    conflict_policy: { type: "string", enum: ["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"] },
+    on_task_failure: { type: "string", enum: ["keep_others_running", "cancel_all"], default: "keep_others_running" }
+  }
+} as const;
+
+/** revise 工具 JSON schema。 */
+export const subagentReviseInputJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["correction"],
+  properties: {
+    task_id: { type: "string", description: "推荐；来自 subagent_run/subagent_run_many 的 task_id" },
+    task: taskJsonSchema(),
+    previous_result: { type: "string", description: "当 task_id 不可用或需要覆盖上一轮结果时传入" },
+    correction: {
+      type: "object",
+      additionalProperties: false,
+      required: ["reason"],
+      properties: {
+        reason: { type: "string" },
+        rejected_result: { type: "string" },
+        expected_change: { type: "string" }
+      }
+    },
+    message: { type: "string" },
+    additional_files: { type: "array", items: taskFileSchemaToJson() },
+    cwd: { type: "string" },
+    agent_type: { type: "string" },
+    timeout_secs: { type: "integer", minimum: 1 },
+    inactivity_timeout_secs: { type: "integer", minimum: 1 },
+    mode: { type: "string", enum: ["analyze", "review", "edit", "implement", "debug", "custom"], default: "custom" },
+    conflict_policy: { type: "string", enum: ["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"] },
+    mcp_server_profiles: { type: "array", items: { type: "string" } },
+    skills: skillOptionsJsonSchema(),
+    output: outputOptionsJsonSchema()
+  }
+} as const;
+
+/** revise_many 工具 JSON schema。 */
+export const subagentReviseManyInputJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["revisions"],
+  properties: {
+    revisions: { type: "array", minItems: 1, maxItems: 32, items: omitProperty(subagentReviseInputJsonSchema, "conflict_policy") },
+    conflict_policy: { type: "string", enum: ["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"] },
+    on_task_failure: { type: "string", enum: ["keep_others_running", "cancel_all"], default: "keep_others_running" }
+  }
 } as const;
 
 /** subagent_run 输出 JSON Schema，供支持 outputSchema 的 MCP client 使用。 */
@@ -185,6 +204,9 @@ export const subagentRunOutputJsonSchema = {
   required: ["schema_version", "status", "agent_type", "summary", "result", "metrics", "errors"],
   properties: {
     schema_version: { type: "integer", const: 1 },
+    task_id: { type: "string" },
+    title: { type: "string" },
+    revision_of_task_id: { type: "string" },
     status: { type: "string", enum: ["completed", "failed", "partial", "timeout", "cancelled"] },
     agent_type: { type: "string" },
     session_id: { type: "string" },
@@ -196,6 +218,30 @@ export const subagentRunOutputJsonSchema = {
     skills: { type: "object", additionalProperties: true },
     errors: { type: "array", items: { type: "object", additionalProperties: true } }
   }
+} as const;
+
+/** run_many 输出 JSON schema。 */
+export const subagentRunManyOutputJsonSchema = {
+  type: "object",
+  additionalProperties: true,
+  required: ["schema_version", "status", "completed", "failed", "rejected", "cancelled_task_ids", "elapsed_ms", "summary"],
+  properties: {
+    schema_version: { type: "integer", const: 1 },
+    status: { type: "string", enum: ["completed", "partial", "failed", "cancelled"] },
+    completed: { type: "array", items: { type: "object", additionalProperties: true } },
+    failed: { type: "array", items: { type: "object", additionalProperties: true } },
+    rejected: { type: "array", items: { type: "object", additionalProperties: true } },
+    cancelled_task_ids: { type: "array", items: { type: "string" } },
+    elapsed_ms: { type: "integer" },
+    summary: { type: "string" }
+  }
+} as const;
+
+/** subagent_list MCP JSON Schema。 */
+export const subagentListInputJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {}
 } as const;
 
 /** subagent_list 输出 JSON Schema。 */
@@ -233,202 +279,6 @@ export const subagentListOutputJsonSchema = {
   }
 } as const;
 
-/** subagent_start 输入 zod schema。 */
-export const subagentStartInputSchema = subagentRunInputSchema.extend({
-  keep_alive: z.boolean().default(false),
-  conflict_policy: z.enum(["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"]).optional()
-});
-
-/** subagent_start_many 输入 zod schema。 */
-export const subagentStartManyInputSchema = z.object({
-  tasks: z.array(subagentStartInputSchema.omit({ conflict_policy: true })).min(1).max(32),
-  conflict_policy: z.enum(["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"]).optional(),
-  on_task_failure: z.enum(["keep_others_running", "cancel_all"]).default("keep_others_running")
-}).strict();
-
-const waitReturnWhenSchema = z.enum(["all_completed", "first_completed", "first_success", "first_failure", "any_update", "timeout_partial"]);
-const waitOnTimeoutSchema = z.enum(["keep_running", "cancel_pending"]);
-
-/** subagent_run_many 输入 zod schema。 */
-export const subagentRunManyInputSchema = subagentStartManyInputSchema.extend({
-  return_when: waitReturnWhenSchema.default("all_completed"),
-  wait_timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
-  on_timeout: waitOnTimeoutSchema.default("cancel_pending")
-}).strict();
-
-/** subagent_wait 输入 zod schema。 */
-export const subagentWaitInputSchema = z.object({
-  task_ids: z.array(z.string().min(1)).min(1).max(64),
-  return_when: waitReturnWhenSchema,
-  timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
-  on_timeout: waitOnTimeoutSchema.default("keep_running")
-}).strict();
-
-/** subagent_result 输入 zod schema。 */
-export const subagentResultInputSchema = z.object({
-  task_id: z.string().min(1),
-  include_events: z.boolean().default(false),
-  include_raw_output: z.boolean().default(false),
-  max_chars: z.number().int().min(200).max(50000).default(4000)
-}).strict();
-
-/** subagent_continue 输入 zod schema。 */
-export const subagentContinueInputSchema = z.object({
-  task_id: z.string().min(1),
-  message: z.string().min(1),
-  correction: z.object({
-    reason: z.string().min(1),
-    rejected_result: z.string().optional(),
-    expected_change: z.string().optional()
-  }).strict().optional(),
-  additional_files: z.array(taskFileSchema).max(200).optional(),
-  mode: z.enum(["revise", "fix", "clarify", "continue", "custom"]).default("continue"),
-  timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
-  inactivity_timeout_secs: z.number().int().positive().max(24 * 60 * 60).optional(),
-  skills: skillBridgeSchema.optional(),
-  output: outputOptionsSchema.optional()
-}).strict();
-
-/** subagent_cancel 输入 zod schema。 */
-export const subagentCancelInputSchema = z.object({
-  task_ids: z.array(z.string().min(1)).min(1).max(64),
-  reason: z.string().optional()
-}).strict();
-
-/** subagent_close 输入 zod schema。 */
-export const subagentCloseInputSchema = z.object({
-  task_id: z.string().min(1),
-  force: z.boolean().default(false)
-}).strict();
-
-/** subagent_logs 输入 zod schema。 */
-export const subagentLogsInputSchema = z.object({
-  task_id: z.string().min(1),
-  log_type: z.enum(["events", "stderr", "result", "prompt", "task"]).default("events"),
-  max_bytes: z.number().int().min(200).max(1_000_000).default(20000),
-  redacted: z.boolean().default(true)
-}).strict();
-
-/** start 工具 JSON schema。 */
-export const subagentStartInputJsonSchema = {
-  ...subagentRunInputJsonSchema,
-  properties: {
-    ...subagentRunInputJsonSchema.properties,
-    keep_alive: { type: "boolean", default: false, description: "完成后是否保留 session 以支持 continue" },
-    conflict_policy: { type: "string", enum: ["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"] }
-  }
-} as const;
-
-/** start_many 工具 JSON schema。 */
-export const subagentStartManyInputJsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["tasks"],
-  properties: {
-    tasks: { type: "array", minItems: 1, maxItems: 32, items: subagentStartInputJsonSchema },
-    conflict_policy: { type: "string", enum: ["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"] },
-    on_task_failure: { type: "string", enum: ["keep_others_running", "cancel_all"], default: "keep_others_running" }
-  }
-} as const;
-
-/** run_many 工具 JSON schema。 */
-export const subagentRunManyInputJsonSchema = {
-  ...subagentStartManyInputJsonSchema,
-  properties: {
-    ...subagentStartManyInputJsonSchema.properties,
-    return_when: { type: "string", enum: ["all_completed", "first_completed", "first_success", "first_failure", "any_update", "timeout_partial"], default: "all_completed" },
-    wait_timeout_secs: { type: "integer", minimum: 1, description: "批量等待最大时间，单位秒；不影响单个任务自己的 timeout_secs" },
-    on_timeout: { type: "string", enum: ["keep_running", "cancel_pending"], default: "cancel_pending" }
-  }
-} as const;
-
-/** wait 工具 JSON schema。 */
-export const subagentWaitInputJsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["task_ids", "return_when"],
-  properties: {
-    task_ids: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 64 },
-    return_when: { type: "string", enum: ["all_completed", "first_completed", "first_success", "first_failure", "any_update", "timeout_partial"] },
-    timeout_secs: { type: "integer", minimum: 1 },
-    on_timeout: { type: "string", enum: ["keep_running", "cancel_pending"], default: "keep_running" }
-  }
-} as const;
-
-/** result 工具 JSON schema。 */
-export const subagentResultInputJsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["task_id"],
-  properties: {
-    task_id: { type: "string" },
-    include_events: { type: "boolean", default: false },
-    include_raw_output: { type: "boolean", default: false },
-    max_chars: { type: "integer", minimum: 200, maximum: 50000, default: 4000 }
-  }
-} as const;
-
-/** continue 工具 JSON schema。 */
-export const subagentContinueInputJsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["task_id", "message"],
-  properties: {
-    task_id: { type: "string" },
-    message: { type: "string" },
-    correction: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        reason: { type: "string" },
-        rejected_result: { type: "string" },
-        expected_change: { type: "string" }
-      }
-    },
-    additional_files: { type: "array", items: taskFileSchemaToJson() },
-    mode: { type: "string", enum: ["revise", "fix", "clarify", "continue", "custom"], default: "continue" },
-    timeout_secs: { type: "integer", minimum: 1 },
-    inactivity_timeout_secs: { type: "integer", minimum: 1 },
-    skills: subagentRunInputJsonSchema.properties.skills,
-    output: subagentRunInputJsonSchema.properties.output
-  }
-} as const;
-
-/** cancel 工具 JSON schema。 */
-export const subagentCancelInputJsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["task_ids"],
-  properties: {
-    task_ids: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 64 },
-    reason: { type: "string" }
-  }
-} as const;
-
-/** close 工具 JSON schema。 */
-export const subagentCloseInputJsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["task_id"],
-  properties: {
-    task_id: { type: "string" },
-    force: { type: "boolean", default: false }
-  }
-} as const;
-
-/** logs 工具 JSON schema。 */
-export const subagentLogsInputJsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["task_id"],
-  properties: {
-    task_id: { type: "string" },
-    log_type: { type: "string", enum: ["events", "stderr", "result", "prompt", "task"], default: "events" },
-    max_bytes: { type: "integer", minimum: 200, maximum: 1000000, default: 20000 },
-    redacted: { type: "boolean", default: true }
-  }
-} as const;
-
 /** 通用紧凑输出 JSON schema。 */
 export const genericToolOutputJsonSchema = {
   type: "object",
@@ -440,6 +290,69 @@ export const genericToolOutputJsonSchema = {
   }
 } as const;
 
+function taskJsonSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["title", "goal"],
+    properties: {
+      title: { type: "string" },
+      goal: { type: "string" },
+      background: { type: "string" },
+      instructions: { type: "array", items: { type: "string" } },
+      constraints: { type: "array", items: { type: "string" } },
+      success_criteria: { type: "array", items: { type: "string" } },
+      files: { type: "array", items: taskFileSchemaToJson() },
+      expected_output: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          format: { type: "string", enum: ["text", "markdown", "json", "patch", "structured"] }
+        }
+      },
+      parent_context: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          parent_agent: { type: "string" },
+          conversation_summary: { type: "string" },
+          previous_findings: { type: "array", items: { type: "string" } }
+        }
+      }
+    }
+  };
+}
+
+function outputOptionsJsonSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      mode: { type: "string", enum: ["compact", "standard", "full"], default: "compact" },
+      max_result_chars: { type: "integer", minimum: 200, maximum: 50000, default: 4000 },
+      max_findings: { type: "integer", minimum: 0, maximum: 100, default: 8 },
+      include_diagnostics: { type: "boolean", default: false },
+      include_structured: { type: "boolean", default: false }
+    }
+  };
+}
+
+function skillOptionsJsonSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    description: "父代理 Skill 桥接；默认只注入低 token 的 skill 清单。mode=inline 时仅内联 names 指定的 SKILL.md",
+    properties: {
+      mode: { type: "string", enum: ["off", "list", "inline"] },
+      names: { type: "array", items: { type: "string" } },
+      include_project: { type: "boolean" },
+      include_user: { type: "boolean" },
+      max_skill_chars: { type: "integer", minimum: 200, maximum: 50000 },
+      max_total_chars: { type: "integer", minimum: 200, maximum: 100000 }
+    }
+  };
+}
+
 /** 把 TaskFile schema 映射成简短 JSON schema。 */
 function taskFileSchemaToJson(): Record<string, unknown> {
   return {
@@ -447,7 +360,7 @@ function taskFileSchemaToJson(): Record<string, unknown> {
     additionalProperties: false,
     required: ["path", "role", "action"],
     properties: {
-      path: { type: "string" },
+      path: { type: "string", description: "相对 cwd 的安全路径" },
       role: { type: "string", enum: ["primary", "reference", "test", "config", "output", "unknown"] },
       action: { type: "string", enum: ["read", "review", "edit", "create", "delete", "ignore"] },
       description: { type: "string" },
@@ -456,4 +369,10 @@ function taskFileSchemaToJson(): Record<string, unknown> {
       line_ranges: { type: "array", items: { type: "object", properties: { start: { type: "integer" }, end: { type: "integer" } } } }
     }
   };
+}
+
+function omitProperty(schema: typeof subagentRunInputJsonSchema | typeof subagentReviseInputJsonSchema, key: string): Record<string, unknown> {
+  const properties = { ...(schema.properties as Record<string, unknown>) };
+  delete properties[key];
+  return { ...schema, properties };
 }

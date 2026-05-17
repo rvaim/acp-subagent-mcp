@@ -33,7 +33,9 @@ export interface SubagentTurnRecord {
 }
 
 /**
- * 正在运行或保留中的子代理任务。
+ * 正在运行或已完成、可用于同步打回重写的子代理任务元数据。
+ *
+ * 重要：完成后会清理 ACP client 和子进程，只保留 task/result/log 路径等轻量元数据。
  */
 export interface ActiveSubagentTask {
   /** MCP Server 对外暴露的 task id。 */
@@ -54,8 +56,6 @@ export interface ActiveSubagentTask {
   isWriter: boolean;
   /** 当前冲突策略。 */
   conflictPolicy: ConflictPolicy;
-  /** 是否保留 session 以支持 continue。 */
-  keepAlive: boolean;
   /** 创建时间。 */
   createdAt: Date;
   /** 启动时间。 */
@@ -66,7 +66,7 @@ export interface ActiveSubagentTask {
   lastActivityAt?: Date;
   /** ACP session id。 */
   sessionId?: string;
-  /** ACP client。 */
+  /** ACP client。完成后会清空。 */
   client?: GenericAcpClient;
   /** 运行日志。 */
   logger?: RunLogger;
@@ -98,15 +98,11 @@ export interface ActiveSubagentTask {
   errors: SubagentError[];
   /** 并发锁释放函数。 */
   releaseConcurrency?: ReleaseConcurrencyLock;
-  /** session TTL timer。 */
-  sessionTtlTimer?: NodeJS.Timeout;
-  /** completed session TTL timer。 */
-  completedTtlTimer?: NodeJS.Timeout;
   /** 是否已经清理进程和锁。 */
   cleanedUp: boolean;
   /** 正在进行的清理 promise，避免并发清理时提前返回。 */
   cleanupPromise?: Promise<void>;
-  /** 更新序号，用于 any_update 等待策略。 */
+  /** 更新序号，用于内部等待和测试。 */
   updateSeq: number;
 }
 
@@ -143,14 +139,14 @@ export class TaskRegistry {
   }
 
   /**
-   * 列出所有任务。当前主要用于调试和 TTL 清理。
+   * 列出所有任务。当前主要用于 shutdown 清理和测试。
    */
   list(): ActiveSubagentTask[] {
     return Array.from(this.tasks.values());
   }
 
   /**
-   * 标记任务有变化，并唤醒 wait 调用。
+   * 标记任务有变化，并唤醒内部等待。
    */
   notify(taskId: string): void {
     const task = this.tasks.get(taskId);

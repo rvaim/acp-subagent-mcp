@@ -3,22 +3,20 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config/types.js";
 import type { GenericAcpClient } from "../acp/AcpClient.js";
 import { GenericAcpClient as GenericAcpClientClass } from "../acp/AcpClient.js";
-import { renderSubagentContinuePrompt, renderSubagentPrompt } from "../task/renderSubagentPrompt.js";
+import { renderSubagentPrompt, renderSubagentRevisionPrompt } from "../task/renderSubagentPrompt.js";
 import { buildRunOutput, deriveRunStatus, parseSubagentResult } from "../task/parseSubagentResult.js";
 import { normalizeOutputOptions } from "../task/outputOptions.js";
 import { buildSkillPromptContext, type SkillPromptContext } from "../skills/skillBridge.js";
 import type {
   ConflictPolicy,
   ResolvedTaskFile,
-  SubagentContinueInput,
-  SubagentContinueOutput,
   SubagentOutputOptions,
+  SubagentReviseInput,
   SubagentRunInput,
   SubagentRunOutput,
   SubagentRunStatus,
-  SubagentStartInput,
-  SubagentStartOutput,
-  SubagentStructuredResult
+  SubagentStructuredResult,
+  TaskFile
 } from "../task/types.js";
 import { buildAgentEnv, spawnAgentProcess } from "./processManager.js";
 import type { ConcurrencyManager } from "./concurrency.js";
@@ -36,7 +34,7 @@ import {
   toDisplayRelativePath
 } from "./security.js";
 import { finalizeWorktree, prepareExecutionWorkspace } from "./worktree.js";
-import { isFinishedTaskState, isTerminalTaskState, type ActiveSubagentTask, type SubagentTurnRecord, type TaskRegistry } from "./taskRegistry.js";
+import { isTerminalTaskState, type ActiveSubagentTask, type SubagentTurnRecord, type TaskRegistry } from "./taskRegistry.js";
 
 /**
  * 子代理任务启动依赖。
@@ -51,9 +49,8 @@ export interface SubagentTaskRunnerDependencies {
   /**
    * 当前 MCP tool call 的取消信号。
    *
-   * MCP Host 手动停止会话、发送 notifications/cancelled 或 stdio 断开时，
-   * 官方 MCP SDK 会 abort 该信号。运行中的同步任务、wait 等必须把它
-   * 级联到 ACP session/cancel 和子进程树清理，避免后台孤儿子代理。
+   * MCP Host 手动停止当前同步 tool call 时，SDK 会 abort 该信号。运行中的
+   * run/run_many/revise/revise_many 会把它级联到 ACP session/cancel 和子进程树清理。
    */
   requestSignal?: AbortSignal;
 }
@@ -63,22 +60,29 @@ export interface SubagentTaskRunnerDependencies {
  */
 export interface StartTaskOptions {
   /** 子代理运行输入。 */
-  input: SubagentStartInput;
-  /** 是否保留 session。 */
-  keepAlive: boolean;
+  input: SubagentRunInput;
   /** 可选指定 task id。 */
   taskId?: string;
   /** 本次启动使用的冲突策略。 */
   conflictPolicy?: ConflictPolicy;
+  /** 打回重写上下文；存在时使用 revision prompt。 */
+  revision?: {
+    previousResult: string;
+    message?: string;
+    correction: NonNullable<SubagentReviseInput["correction"]>;
+  };
 }
 
 /**
  * 启动一个子代理任务，并让第一轮 prompt 在后台运行。
+ *
+ * 这是内部函数；外部 MCP 接口不会拿到“后台运行中的 task”。同步工具会立即等待
+ * currentTurnPromise 结束或 requestSignal 取消。
  */
 export async function startSubagentTask(options: StartTaskOptions, deps: SubagentTaskRunnerDependencies): Promise<ActiveSubagentTask> {
   const input = options.input;
   const agentType = input.agent_type || deps.config.defaults.default_agent;
-  const normalizedInput: SubagentStartInput = { ...input, agent_type: agentType };
+  const normalizedInput: SubagentRunInput = { ...input, agent_type: agentType };
   assertKnownAgent(deps.config, agentType);
   const currentDepth = assertDepthAllowed(deps.config.defaults.max_depth);
   throwIfRequestAborted(deps);
@@ -110,20 +114,39 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
     });
 
     logger = await createRunLogger({ cwd: originalCwd, logDir: deps.config.defaults.log_dir, taskId, config: deps.config.logs });
-    await logger.writeJson("task.json", { ...normalizedInput, task_id: taskId, execution_cwd: executionCwd, conflict_policy: conflictPolicy });
+    await logger.writeJson("task.json", {
+      ...normalizedInput,
+      task_id: taskId,
+      execution_cwd: executionCwd,
+      conflict_policy: conflictPolicy,
+      revision: options.revision ? { correction: options.revision.correction, message: options.revision.message } : undefined
+    });
 
     const outputOptions = normalizeOutputOptions(input.output);
     const permissions = resolveEffectivePermissions(deps.config, normalizedInput);
     const skillContext = await buildSkillPromptContext({ config: deps.config, cwd: originalCwd, input: normalizedInput.skills });
-    const rendered = renderSubagentPrompt({
-      mode: normalizedInput.mode ?? "analyze",
-      task: normalizedInput.task,
-      files,
-      systemPrompt: agent.system_prompt,
-      permissions,
-      output: outputOptions,
-      skills: skillContext
-    });
+    const rendered = options.revision
+      ? renderSubagentRevisionPrompt({
+        mode: normalizedInput.mode ?? "custom",
+        task: normalizedInput.task,
+        previousResult: options.revision.previousResult,
+        message: options.revision.message,
+        correction: options.revision.correction,
+        files,
+        systemPrompt: agent.system_prompt,
+        permissions,
+        output: outputOptions,
+        skills: skillContext
+      })
+      : renderSubagentPrompt({
+        mode: normalizedInput.mode ?? "analyze",
+        task: normalizedInput.task,
+        files,
+        systemPrompt: agent.system_prompt,
+        permissions,
+        output: outputOptions,
+        skills: skillContext
+      });
     assertPromptSize(rendered.text, deps.config.defaults.max_prompt_chars);
     await logger.writePrompt(rendered.text);
 
@@ -137,7 +160,6 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
       status: "starting",
       isWriter,
       conflictPolicy,
-      keepAlive: options.keepAlive,
       createdAt: new Date(),
       startedAt: new Date(),
       lastActivityAt: new Date(),
@@ -158,6 +180,8 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
     detachRequestAbort = bindRequestAbortToTask(active, deps, "MCP tool call 已取消，正在停止子代理");
 
     const env = buildAgentEnv(agent, currentDepth, executionCwd);
+    env.ACP_SUBAGENT_TASK_ID = taskId;
+    const processEnvMarker = { key: "ACP_SUBAGENT_TASK_ID", value: taskId };
     const spawned = spawnAgentProcess({
       config: deps.config,
       agent,
@@ -183,7 +207,8 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
       },
       maxReadFileBytes: deps.config.security.max_read_file_bytes,
       acpCancelGraceMs: deps.config.defaults.acp_cancel_grace_ms,
-      processKillGraceMs: deps.config.defaults.process_kill_grace_ms
+      processKillGraceMs: deps.config.defaults.process_kill_grace_ms,
+      processEnvMarker
     });
     active.client = client;
 
@@ -195,7 +220,6 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
       await client?.shutdown().catch(() => undefined);
     });
     active.sessionId = session.sessionId;
-    scheduleSessionTtl(active, deps);
 
     launchPromptTurn({
       active,
@@ -205,7 +229,7 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
       inactivityTimeoutSecs: normalizedInput.inactivity_timeout_secs,
       outputOptions,
       skillContext,
-      turnKind: "initial"
+      revisionOfTaskId: extractRevisionOfTaskId(input.task)
     });
 
     detachRequestAbort?.();
@@ -223,8 +247,8 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
 /**
  * 同步运行一个子代理任务，等待第一轮结束后返回结果。
  */
-export async function runSubagentTask(input: SubagentStartInput, deps: SubagentTaskRunnerDependencies): Promise<SubagentRunOutput> {
-  const active = await startSubagentTask({ input, keepAlive: false, conflictPolicy: input.conflict_policy }, deps);
+export async function runSubagentTask(input: SubagentRunInput, deps: SubagentTaskRunnerDependencies): Promise<SubagentRunOutput> {
+  const active = await startSubagentTask({ input, conflictPolicy: input.conflict_policy }, deps);
   const detachRequestAbort = bindRequestAbortToTask(active, deps, "MCP tool call 已取消，正在停止子代理");
   try {
     await active.currentTurnPromise;
@@ -238,81 +262,63 @@ export async function runSubagentTask(input: SubagentStartInput, deps: SubagentT
 }
 
 /**
- * 对已有 session 发起下一轮 prompt。调用方随后可用 wait/result 查询结果。
+ * 同步打回重写。不会复用上一轮子代理进程；只复用任务元数据和上一轮结果文本。
  */
-export async function continueSubagentTask(input: SubagentContinueInput, deps: SubagentTaskRunnerDependencies): Promise<SubagentContinueOutput> {
-  const active = deps.registry.get(input.task_id);
-  if (!active) throw new SubagentRuntimeError("invalid_input", `任务不存在：${input.task_id}`);
-  if (!active.keepAlive || !active.client || !active.sessionId || active.status === "closed") {
-    throw new SubagentRuntimeError("invalid_input", `任务不支持继续对话或 session 已关闭：${input.task_id}`);
-  }
-  if (!isFinishedTaskState(active.status)) {
-    throw new SubagentRuntimeError("invalid_input", `上一轮尚未结束，不能继续：${input.task_id}`);
+export async function reviseSubagentTask(input: SubagentReviseInput, deps: SubagentTaskRunnerDependencies): Promise<SubagentRunOutput> {
+  const source = input.task_id ? deps.registry.get(input.task_id) : undefined;
+  if (input.task_id && !source && !input.task) {
+    throw new SubagentRuntimeError("invalid_input", `任务不存在或 MCP Server 已重启，请同时传入 task 和 previous_result：${input.task_id}`);
   }
 
-  const outputOptions = normalizeOutputOptions(input.output ?? active.outputOptions);
-  const files = await resolveTaskFiles({
-    cwd: active.executionCwd,
-    files: input.additional_files,
-    maxInlineChars: deps.config.defaults.max_inline_file_chars
-  });
-  const skillContext = input.skills ? await buildSkillPromptContext({ config: deps.config, cwd: active.cwd, input: input.skills }) : undefined;
-  const rendered = renderSubagentContinuePrompt({
-    mode: input.mode ?? "continue",
-    message: input.message,
-    correction: input.correction,
-    files,
-    output: outputOptions,
-    skills: skillContext
-  });
-  assertPromptSize(rendered.text, deps.config.defaults.max_prompt_chars);
-  await active.logger?.writePrompt(`\n\n--- continue ${new Date().toISOString()} ---\n\n${rendered.text}`);
+  const baseTask = input.task ?? source?.task;
+  if (!baseTask) {
+    throw new SubagentRuntimeError("invalid_input", "subagent_revise 需要 task_id，或显式传入 task");
+  }
 
-  const turnId = launchPromptTurn({
-    active,
-    deps,
-    promptText: rendered.text,
-    timeoutSecs: input.timeout_secs,
-    inactivityTimeoutSecs: input.inactivity_timeout_secs,
-    outputOptions,
-    skillContext,
-    turnKind: "continue"
-  });
-  const detachRequestAbort = bindRequestAbortToTask(active, deps, "MCP continue call 已取消，正在停止本轮子代理任务");
-  active.currentTurnPromise?.finally(detachRequestAbort).catch(() => undefined);
+  const previousResult = input.previous_result ?? resultTextFromSource(source);
+  if (!previousResult?.trim()) {
+    throw new SubagentRuntimeError("invalid_input", "subagent_revise 需要 previous_result，或 task_id 必须指向已有完成结果");
+  }
 
-  return {
-    schema_version: 1,
-    status: "started",
-    task_id: active.taskId,
-    turn_id: turnId,
-    session_id: active.sessionId,
-    created_at: new Date().toISOString(),
-    summary: `已向子代理继续发送任务：${active.taskId}`
+  const revisionOfTaskId = input.task_id ?? source?.taskId;
+  const revisionTask = buildRevisionTask(baseTask, input, previousResult, revisionOfTaskId);
+  const runInput: SubagentRunInput = {
+    agent_type: input.agent_type ?? source?.agentType,
+    task: revisionTask,
+    cwd: input.cwd ?? source?.cwd,
+    timeout_secs: input.timeout_secs,
+    inactivity_timeout_secs: input.inactivity_timeout_secs,
+    mode: input.mode ?? "custom",
+    mcp_server_profiles: input.mcp_server_profiles,
+    skills: input.skills,
+    output: input.output ?? source?.outputOptions,
+    conflict_policy: input.conflict_policy
   };
-}
 
-/**
- * 取消一个任务。
- */
-export async function cancelActiveTask(active: ActiveSubagentTask, reason?: string): Promise<"cancelled" | "already_terminal"> {
-  if (isTerminalTaskState(active.status)) return "already_terminal";
-  active.status = "cancelling";
-  active.errors.push(makeSubagentError("cancelled", reason ? `任务已取消：${reason}` : "任务已取消", { recoverable: true }));
-  active.timeoutController?.abort("cancelled");
-  if (active.client && active.sessionId) {
-    await active.client.cancel(active.sessionId).catch(() => undefined);
+  const active = await startSubagentTask({
+    input: runInput,
+    conflictPolicy: input.conflict_policy,
+    revision: {
+      previousResult,
+      message: input.message,
+      correction: input.correction
+    }
+  }, deps);
+  const detachRequestAbort = bindRequestAbortToTask(active, deps, "MCP revise call 已取消，正在停止子代理");
+  try {
+    await active.currentTurnPromise;
+    if (!active.result) {
+      throw new SubagentRuntimeError("internal_error", "子代理重写任务结束但没有生成结果");
+    }
+    active.result.revision_of_task_id = revisionOfTaskId;
+    return active.result;
+  } finally {
+    detachRequestAbort();
   }
-  return "cancelled";
 }
 
 /**
- * 强制取消并立刻清理本地进程树。
- *
- * 与 cancelActiveTask 不同，本函数不等待 ACP adapter 对 session/cancel
- * 作出响应，也不等待 currentTurnPromise 自然结束。它用于 MCP request
- * cancellation、transport 断开和进程退出等兜底路径，目标是优先保证
- * 本机不会留下继续运行的子代理进程。
+ * 取消一个任务并立刻清理本地进程树。
  */
 export async function forceCancelActiveTask(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies, reason?: string): Promise<"cancelled" | "already_terminal"> {
   if (isTerminalTaskState(active.status) && active.cleanedUp) return "already_terminal";
@@ -327,7 +333,7 @@ export async function forceCancelActiveTask(active: ActiveSubagentTask, deps: Su
     }
   }
 
-  await cleanupActiveTask(active, deps, true);
+  await cleanupActiveTask(active, deps);
 
   if (!isTerminalTaskState(active.status)) {
     active.status = "cancelled";
@@ -338,36 +344,9 @@ export async function forceCancelActiveTask(active: ActiveSubagentTask, deps: Su
 }
 
 /**
- * 关闭任务和底层 session。可用于释放 keep_alive session。
- */
-export async function closeActiveTask(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies, force: boolean): Promise<void> {
-  if (!isFinishedTaskState(active.status) && !force) {
-    throw new SubagentRuntimeError("invalid_input", `任务仍在运行，不能关闭；可设置 force=true：${active.taskId}`);
-  }
-
-  if (!isFinishedTaskState(active.status) && force) {
-    await forceCancelActiveTask(active, deps, "force close");
-    active.status = "closed";
-    active.completedAt = active.completedAt ?? new Date();
-    deps.registry.notify(active.taskId);
-    return;
-  }
-
-  if (active.client && active.sessionId) {
-    await active.client.close(active.sessionId).catch(() => undefined);
-  }
-  await cleanupActiveTask(active, deps, true);
-  active.status = "closed";
-  active.completedAt = active.completedAt ?? new Date();
-  deps.registry.notify(active.taskId);
-}
-
-/**
  * 关闭所有活跃任务。
  *
- * 该函数用于 MCP transport 断开、进程收到退出信号或测试主动清理。
- * 它会对每个未终态任务执行 force close，从而触发：
- * ACP session/cancel -> AbortSignal -> 子进程树 SIGTERM/SIGKILL。
+ * 用于 MCP transport 断开、进程收到退出信号或测试主动清理。
  */
 export async function shutdownAllActiveTasks(deps: SubagentTaskRunnerDependencies, reason: string): Promise<void> {
   const tasks = deps.registry.list();
@@ -376,11 +355,11 @@ export async function shutdownAllActiveTasks(deps: SubagentTaskRunnerDependencie
       if (!isTerminalTaskState(task.status)) {
         await forceCancelActiveTask(task, deps, reason);
       } else {
-        await cleanupActiveTask(task, deps, true);
+        await cleanupActiveTask(task, deps);
       }
     } catch {
       task.errors.push(makeSubagentError("cancelled", reason, { recoverable: true }));
-      await cleanupActiveTask(task, deps, true).catch(() => undefined);
+      await cleanupActiveTask(task, deps).catch(() => undefined);
     }
   }));
 }
@@ -396,9 +375,6 @@ function throwIfRequestAborted(deps: SubagentTaskRunnerDependencies): void {
 
 /**
  * 将 MCP 请求取消信号绑定到指定任务。
- *
- * 绑定后，只要主 agent 手动停止当前 tool call，或 MCP transport 关闭，
- * 该任务就会收到 cancel，并在 turn 的 finally 中执行进程树清理。
  */
 function bindRequestAbortToTask(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies, fallbackReason: string): () => void {
   const signal = deps.requestSignal;
@@ -407,7 +383,7 @@ function bindRequestAbortToTask(active: ActiveSubagentTask, deps: SubagentTaskRu
   const onAbort = () => {
     const reason = requestAbortReason(signal, fallbackReason);
     void forceCancelActiveTask(active, deps, reason).catch(async () => {
-      await cleanupActiveTask(active, deps, true).catch(() => undefined);
+      await cleanupActiveTask(active, deps).catch(() => undefined);
     });
   };
 
@@ -422,9 +398,6 @@ function bindRequestAbortToTask(active: ActiveSubagentTask, deps: SubagentTaskRu
 
 /**
  * 将初始化、创建 session 等启动阶段 Promise 与 MCP 请求取消信号竞争。
- *
- * 这些阶段还没有进入 prompt turn，不能依赖 RunTimeoutController；因此必须单独
- * 监听 MCP cancellation，并主动清理已经启动的 ACP 子进程。
  */
 async function raceWithRequestAbort<T>(promise: Promise<T>, deps: SubagentTaskRunnerDependencies, onAbort: () => Promise<void>): Promise<T> {
   const signal = deps.requestSignal;
@@ -491,7 +464,7 @@ function launchPromptTurn(options: {
   inactivityTimeoutSecs?: number;
   outputOptions: Required<SubagentOutputOptions>;
   skillContext?: SkillPromptContext;
-  turnKind: "initial" | "continue";
+  revisionOfTaskId?: string;
 }): string {
   const { active, deps } = options;
   if (!active.client || !active.sessionId) {
@@ -534,7 +507,7 @@ function launchPromptTurn(options: {
       const structured = parseSubagentResult(acpPrompt.text);
       finalStatus = deriveRunStatus(acpPrompt.stopReason, structured);
       const worktree = await finalizeWorktree({ config: deps.config, worktree: active.worktree, status: finalStatus });
-      const output = buildRunOutput({
+      const output = addTaskMetadata(active, buildRunOutput({
         status: finalStatus,
         agentType: active.agentType,
         sessionId: active.sessionId,
@@ -546,7 +519,7 @@ function launchPromptTurn(options: {
         filesTouched: acpPrompt.filesTouched,
         outputOptions: options.outputOptions,
         skillContext: options.skillContext
-      });
+      }), options.revisionOfTaskId);
       active.result = output;
       active.status = finalStatus;
       turn.status = mapRunStatusToTurnStatus(finalStatus);
@@ -566,7 +539,7 @@ function launchPromptTurn(options: {
         errors: [subagentError]
       };
       const worktree = await finalizeWorktree({ config: deps.config, worktree: active.worktree, status: finalStatus }).catch(() => active.worktree);
-      const output = buildRunOutput({
+      const output = addTaskMetadata(active, buildRunOutput({
         status: finalStatus,
         agentType: active.agentType,
         sessionId: active.sessionId,
@@ -578,7 +551,7 @@ function launchPromptTurn(options: {
         outputOptions: options.outputOptions,
         skillContext: options.skillContext,
         extraErrors: active.errors
-      });
+      }), options.revisionOfTaskId);
       active.result = output;
       active.status = finalStatus;
       active.errors.push(subagentError);
@@ -592,12 +565,7 @@ function launchPromptTurn(options: {
       active.completedAt = new Date();
       active.currentTurnId = undefined;
       deps.registry.notify(active.taskId);
-
-      if (!active.keepAlive || active.status === "failed" || active.status === "timeout" || active.status === "cancelled") {
-        await cleanupActiveTask(active, deps, true);
-      } else {
-        scheduleCompletedSessionTtl(active, deps);
-      }
+      await cleanupActiveTask(active, deps);
     }
   })();
 
@@ -606,47 +574,23 @@ function launchPromptTurn(options: {
 }
 
 /**
- * 清理子进程、timer 和并发锁。
+ * 清理子进程和并发锁。完成后只保留 registry 中的元数据和日志路径。
  */
-async function cleanupActiveTask(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies, removeTimers: boolean): Promise<void> {
+async function cleanupActiveTask(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies): Promise<void> {
   if (active.cleanupPromise) {
     await active.cleanupPromise;
     return;
   }
 
   active.cleanupPromise = (async () => {
-    if (removeTimers) {
-      if (active.sessionTtlTimer) clearTimeout(active.sessionTtlTimer);
-      if (active.completedTtlTimer) clearTimeout(active.completedTtlTimer);
-    }
     await active.client?.shutdown().catch(() => undefined);
+    active.client = undefined;
     active.releaseConcurrency?.();
     active.cleanedUp = true;
     deps.registry.notify(active.taskId);
   })();
 
   await active.cleanupPromise;
-}
-
-/**
- * 设置整个 session 的 TTL，到期后强制关闭。
- */
-function scheduleSessionTtl(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies): void {
-  if (active.sessionTtlTimer) clearTimeout(active.sessionTtlTimer);
-  active.sessionTtlTimer = setTimeout(() => {
-    void closeActiveTask(active, deps, true).catch(() => undefined);
-  }, deps.config.defaults.session_ttl_secs * 1000);
-}
-
-/**
- * 设置 completed session 的 TTL，到期后自动 close。
- */
-function scheduleCompletedSessionTtl(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies): void {
-  if (!active.keepAlive) return;
-  if (active.completedTtlTimer) clearTimeout(active.completedTtlTimer);
-  active.completedTtlTimer = setTimeout(() => {
-    void closeActiveTask(active, deps, true).catch(() => undefined);
-  }, deps.config.defaults.completed_session_ttl_secs * 1000);
 }
 
 /**
@@ -666,6 +610,98 @@ function mapRunStatusToTurnStatus(status: SubagentRunStatus): SubagentTurnRecord
   if (status === "timeout") return "timeout";
   if (status === "cancelled") return "cancelled";
   return "failed";
+}
+
+/**
+ * 给输出补充 task 元数据。
+ */
+function addTaskMetadata(active: ActiveSubagentTask, output: SubagentRunOutput, revisionOfTaskId?: string): SubagentRunOutput {
+  return {
+    ...output,
+    task_id: active.taskId,
+    title: active.task.title,
+    revision_of_task_id: revisionOfTaskId ?? output.revision_of_task_id
+  };
+}
+
+
+/**
+ * 从任务上下文中提取“打回重写”的来源任务 id。
+ */
+function extractRevisionOfTaskId(task: SubagentRunInput["task"]): string | undefined {
+  return task.parent_context?.previous_findings
+    ?.find((item) => item.startsWith("revision_of_task_id="))
+    ?.slice("revision_of_task_id=".length);
+}
+
+/**
+ * 从已有任务结果中提取打回文本。
+ */
+function resultTextFromSource(source: ActiveSubagentTask | undefined): string | undefined {
+  const result = source?.result;
+  if (!result) return undefined;
+  const payload = {
+    summary: result.summary,
+    result: result.result,
+    findings: result.findings,
+    files_changed: result.files_changed,
+    risks: result.risks,
+    next_steps: result.next_steps,
+    errors: result.errors
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
+/**
+ * 构造重写任务。重写 prompt 会显式注入上一轮结果和纠正说明。
+ */
+function buildRevisionTask(baseTask: NonNullable<SubagentReviseInput["task"]>, input: SubagentReviseInput, previousResult: string, revisionOfTaskId?: string): NonNullable<SubagentRunInput["task"]> {
+  const correction = input.correction;
+  const files = mergeTaskFiles(baseTask.files, input.additional_files);
+  const previousFindings = [...(baseTask.parent_context?.previous_findings ?? [])];
+  if (revisionOfTaskId) previousFindings.push(`revision_of_task_id=${revisionOfTaskId}`);
+
+  return {
+    ...baseTask,
+    title: `重写：${baseTask.title}`,
+    background: [
+      baseTask.background,
+      "上一轮结果被主代理审核后打回，需要重新产出完整结果。",
+      `上一轮结果摘要：${truncateForPrompt(previousResult, 20000)}`,
+      `打回原因：${correction.reason}`,
+      correction.rejected_result ? `被拒绝结果摘要：${correction.rejected_result}` : undefined,
+      correction.expected_change ? `期望修正：${correction.expected_change}` : undefined,
+      input.message ? `额外重写指令：${input.message}` : undefined
+    ].filter(Boolean).join("\n\n"),
+    instructions: [
+      ...(baseTask.instructions ?? []),
+      "这是一次主代理审核后的打回重写。请重新产出完整结果，不要只给差异说明。",
+      "必须修正打回原因中指出的问题；无法满足时在 risks 或 errors 中说明。"
+    ],
+    files,
+    parent_context: {
+      ...baseTask.parent_context,
+      previous_findings: previousFindings
+    }
+  };
+}
+
+/**
+ * 合并原始文件列表和重写新增文件，后者同 path 覆盖前者。
+ */
+function mergeTaskFiles(baseFiles?: TaskFile[], extraFiles?: TaskFile[]): TaskFile[] | undefined {
+  if (!baseFiles?.length && !extraFiles?.length) return undefined;
+  const byPath = new Map<string, TaskFile>();
+  for (const file of baseFiles ?? []) byPath.set(file.path, file);
+  for (const file of extraFiles ?? []) byPath.set(file.path, file);
+  return Array.from(byPath.values());
+}
+
+/**
+ * 避免把上一轮超长结果直接塞爆 prompt。
+ */
+function truncateForPrompt(text: string, maxChars: number): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n[TRUNCATED]` : text;
 }
 
 /**

@@ -16,6 +16,16 @@ export interface SpawnedAgentProcess {
 }
 
 /**
+ * 用于识别本任务子进程家族的环境变量标记。
+ * 某些 agent/adapter 会再启动脱离原 process group 的孙进程；只靠 PPID/PGID
+ * 不一定能覆盖。给子进程注入唯一环境变量后，清理时可通过进程表兜底匹配。
+ */
+export interface ProcessEnvMarker {
+  key: string;
+  value: string;
+}
+
+/**
  * 根据 agent 配置构造子进程环境变量。
  *
  * 默认 env_policy=all：完整继承 MCP Server 进程可见的环境变量。这样 Claude、
@@ -75,7 +85,7 @@ export function spawnAgentProcess(options: {
 /**
  * 尝试终止子进程树。
  */
-export async function terminateProcessTree(child: ChildProcessWithoutNullStreams, options: { sigtermGraceMs: number; sigkillGraceMs: number }): Promise<void> {
+export async function terminateProcessTree(child: ChildProcessWithoutNullStreams, options: { sigtermGraceMs: number; sigkillGraceMs: number; envMarker?: ProcessEnvMarker }): Promise<void> {
   try {
     if (process.platform === "win32") {
       if (!hasChildExited(child)) child.kill("SIGTERM");
@@ -94,13 +104,13 @@ export async function terminateProcessTree(child: ChildProcessWithoutNullStreams
     // adapter 的 process group 中。清理时同时覆盖：
     // 1. root pid；2. root pid 作为 PGID 的 detached group；
     // 3. ps 快照里能看到的所有后代 PID 和它们自己的 PGID。
-    const targets = collectUnixKillTargets(pid);
+    const targets = collectUnixKillTargets(pid, options.envMarker);
     signalUnixKillTargets(targets, "SIGTERM");
     await waitForChildExit(child, options.sigtermGraceMs);
 
-    if (!hasChildExited(child) || isUnixKillTargetsAlive(targets) || isUnixProcessTreeAlive(pid)) {
+    if (!hasChildExited(child) || isUnixKillTargetsAlive(targets) || isUnixProcessTreeAlive(pid, options.envMarker)) {
       signalUnixKillTargets(targets, "SIGKILL");
-      signalUnixProcessTree(pid, "SIGKILL");
+      signalUnixProcessTree(pid, "SIGKILL", options.envMarker);
       await waitForChildExit(child, options.sigkillGraceMs);
     }
   } finally {
@@ -231,6 +241,7 @@ interface UnixProcessInfo {
   pid: number;
   ppid: number;
   pgid: number;
+  command?: string;
 }
 
 interface UnixKillTargets {
@@ -242,19 +253,21 @@ interface UnixKillTargets {
  * 收集 Unix kill 目标。必须在第一次 SIGTERM 前完成，避免 root 退出后
  * detached 孙进程被 reparent 到 init，后续再按 PPID 就找不到。
  */
-function collectUnixKillTargets(rootPid: number): UnixKillTargets {
+function collectUnixKillTargets(rootPid: number, envMarker?: ProcessEnvMarker): UnixKillTargets {
   const processes = collectUnixProcessTree(rootPid);
+  const markerProcesses = envMarker ? collectUnixProcessesByEnvMarker(envMarker) : [];
+  const combined = dedupeUnixProcesses([...processes, ...markerProcesses]);
   return {
-    pids: new Set<number>([rootPid, ...processes.map((item) => item.pid)]),
-    pgids: new Set<number>([rootPid, ...processes.map((item) => item.pgid).filter((pgid) => pgid > 1)])
+    pids: new Set<number>([rootPid, ...combined.map((item) => item.pid)]),
+    pgids: new Set<number>([rootPid, ...combined.map((item) => item.pgid).filter((pgid) => pgid > 1)])
   };
 }
 
 /**
  * 向 Unix 进程树和相关进程组发送信号。
  */
-function signalUnixProcessTree(rootPid: number, signal: NodeJS.Signals): void {
-  signalUnixKillTargets(collectUnixKillTargets(rootPid), signal);
+function signalUnixProcessTree(rootPid: number, signal: NodeJS.Signals, envMarker?: ProcessEnvMarker): void {
+  signalUnixKillTargets(collectUnixKillTargets(rootPid, envMarker), signal);
 }
 
 /**
@@ -300,10 +313,13 @@ function isUnixKillTargetsAlive(targets: UnixKillTargets): boolean {
 /**
  * 判断 root pid、root process group 或其后代是否仍然存活。
  */
-function isUnixProcessTreeAlive(rootPid: number): boolean {
+function isUnixProcessTreeAlive(rootPid: number, envMarker?: ProcessEnvMarker): boolean {
   if (isPidAlive(rootPid)) return true;
   if (isProcessGroupAlive(rootPid)) return true;
-  return collectUnixProcessTree(rootPid).some((item) => isPidAlive(item.pid) || isProcessGroupAlive(item.pgid));
+  const processes = envMarker
+    ? dedupeUnixProcesses([...collectUnixProcessTree(rootPid), ...collectUnixProcessesByEnvMarker(envMarker)])
+    : collectUnixProcessTree(rootPid);
+  return processes.some((item) => isPidAlive(item.pid) || isProcessGroupAlive(item.pgid));
 }
 
 /**
@@ -350,9 +366,67 @@ function listUnixProcesses(): UnixProcessInfo[] {
 
   return output.stdout
     .split(/\r?\n/)
-    .map((line) => line.trim().split(/\s+/).map((value) => Number(value)))
-    .filter((parts) => parts.length >= 3 && parts.every((value) => Number.isFinite(value)))
-    .map(([pid, ppid, pgid]) => ({ pid, ppid, pgid }));
+    .map(parseUnixProcessLine)
+    .filter((item): item is UnixProcessInfo => Boolean(item));
+}
+
+/**
+ * 读取 Unix 进程表，尽量包含 command + environment。
+ * Linux/procps 需要 `ps eww axo ...`，macOS/BSD 通常需要 `ps eww -axo ...`。
+ */
+function listUnixProcessesWithCommandAndEnv(): UnixProcessInfo[] {
+  const attempts = [
+    ["eww", "axo", "pid=,ppid=,pgid=,command="],
+    ["eww", "-axo", "pid=,ppid=,pgid=,command="],
+    ["-axo", "pid=,ppid=,pgid=,command="]
+  ];
+
+  for (const args of attempts) {
+    const output = spawnSync("ps", args, { encoding: "utf8" });
+    if (output.status !== 0 || !output.stdout) continue;
+    const processes = output.stdout
+      .split(/\r?\n/)
+      .map(parseUnixProcessLine)
+      .filter((item): item is UnixProcessInfo => Boolean(item));
+    if (processes.length > 0) return processes;
+  }
+
+  return [];
+}
+
+/**
+ * 解析 ps 输出行。前三列是 pid/ppid/pgid，剩余部分可作为 command/env。
+ */
+function parseUnixProcessLine(line: string): UnixProcessInfo | undefined {
+  const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)(?:\s+(.*))?$/);
+  if (!match) return undefined;
+  const pid = Number(match[1]);
+  const ppid = Number(match[2]);
+  const pgid = Number(match[3]);
+  if (![pid, ppid, pgid].every((value) => Number.isFinite(value))) return undefined;
+  return { pid, ppid, pgid, command: match[4] };
+}
+
+/**
+ * 通过唯一环境变量标记兜底查找已脱离原进程树的子进程。
+ */
+function collectUnixProcessesByEnvMarker(marker: ProcessEnvMarker): UnixProcessInfo[] {
+  const needle = `${marker.key}=${marker.value}`;
+  return listUnixProcessesWithCommandAndEnv().filter((item) => item.pid !== process.pid && item.command?.includes(needle));
+}
+
+/**
+ * 按 PID 去重。
+ */
+function dedupeUnixProcesses(processes: UnixProcessInfo[]): UnixProcessInfo[] {
+  const result: UnixProcessInfo[] = [];
+  const seen = new Set<number>();
+  for (const processInfo of processes) {
+    if (seen.has(processInfo.pid)) continue;
+    seen.add(processInfo.pid);
+    result.push(processInfo);
+  }
+  return result;
 }
 
 /**

@@ -79,7 +79,7 @@ export interface SubagentTask {
   constraints?: string[];
   /** 期望输出格式。 */
   expected_output?: ExpectedOutput;
-  /** 成功标准，用于帮助主代理判断是否需要打回重试。 */
+  /** 成功标准，用于帮助主代理判断是否需要打回重写。 */
   success_criteria?: string[];
   /** 父代理传递给子代理的必要上下文摘要。 */
   parent_context?: {
@@ -91,7 +91,6 @@ export interface SubagentTask {
     previous_findings?: string[];
   };
 }
-
 
 /**
  * 子代理 Skill 注入模式。
@@ -132,6 +131,10 @@ export interface SubagentOutputOptions {
   include_structured?: boolean;
 }
 
+/**
+ * 并行任务的文件冲突处理策略。
+ */
+export type ConflictPolicy = "allow_readonly_parallel" | "single_writer_per_cwd" | "sandbox_worktree";
 
 /**
  * 同步运行子代理任务的输入参数。
@@ -155,6 +158,8 @@ export interface SubagentRunInput {
   skills?: SubagentSkillOptions;
   /** 输出压缩选项，用于减少主 agent token。 */
   output?: SubagentOutputOptions;
+  /** 本任务单独指定的冲突策略；未指定时使用配置默认值。 */
+  conflict_policy?: ConflictPolicy;
 }
 
 /**
@@ -307,6 +312,12 @@ export interface SubagentRunArtifacts {
 export interface SubagentRunOutput {
   /** 输出 schema 版本，便于后续兼容升级。 */
   schema_version: 1;
+  /** 本次运行的 task id。可用于后续 subagent_revise。 */
+  task_id?: string;
+  /** 原始任务标题，便于主 agent 做审核和打回。 */
+  title?: string;
+  /** 如果本次是重写，记录被打回的原 task id。 */
+  revision_of_task_id?: string;
   /** 任务最终状态。 */
   status: SubagentRunStatus;
   /** 实际调用的子代理类型。 */
@@ -349,7 +360,8 @@ export interface SubagentRunOutput {
 }
 
 /**
- * 有状态子代理任务在 MCP Server 内部和对外查询时使用的状态。
+ * 有状态子代理任务在 MCP Server 内部使用的状态。
+ * 外部 MCP 接口不再暴露异步查询/等待接口；该状态仅用于同步调用期间清理。
  */
 export type SubagentTaskState =
   | "created"
@@ -365,334 +377,132 @@ export type SubagentTaskState =
   | "closed";
 
 /**
- * 并行任务的文件冲突处理策略。
+ * 批量运行多个子代理任务的单项输入。
  */
-export type ConflictPolicy = "allow_readonly_parallel" | "single_writer_per_cwd" | "sandbox_worktree";
+export type SubagentRunManyItem = Omit<SubagentRunInput, "conflict_policy">;
 
 /**
- * 启动一个有状态子代理任务的输入参数。
+ * 同步批量运行多个子代理任务的输入参数。
  */
-export interface SubagentStartInput extends SubagentRunInput {
-  /** 是否在任务完成后保留 ACP session，以支持后续 continue。 */
-  keep_alive?: boolean;
-  /** 本任务单独指定的冲突策略；未指定时使用配置默认值。 */
-  conflict_policy?: ConflictPolicy;
-}
-
-/**
- * 启动子代理任务后的返回结果。
- */
-export interface SubagentStartOutput {
-  /** 输出 schema 版本。 */
-  schema_version: 1;
-  /** 启动状态。 */
-  status: "started";
-  /** MCP Server 生成的任务 ID。 */
-  task_id: string;
-  /** 实际调用的子代理类型。 */
-  agent_type: string;
-  /** ACP session id。 */
-  session_id?: string;
-  /** 任务创建时间。 */
-  created_at: string;
-  /** 当前任务状态。 */
-  task_status: SubagentTaskState;
-  /** 一句话摘要，用于 MCP text content。 */
-  summary: string;
-}
-
-/**
- * 批量启动多个子代理任务的单项输入。
- */
-export interface SubagentStartManyItem extends Omit<SubagentStartInput, "conflict_policy"> {
-  /** 单项任务是否保留 session。 */
-  keep_alive?: boolean;
-}
-
-/**
- * 批量启动多个子代理任务的输入参数。
- *
- * 启动阶段会按 tasks 顺序逐个完成初始化；启动成功后的任务在后台并发运行。
- */
-export interface SubagentStartManyInput {
-  /** 要并行启动的任务列表。 */
-  tasks: SubagentStartManyItem[];
+export interface SubagentRunManyInput {
+  /** 要并行运行的任务列表。 */
+  tasks: SubagentRunManyItem[];
   /** 文件冲突处理策略。 */
   conflict_policy?: ConflictPolicy;
-  /** 单个任务失败后，其他任务如何处理。 */
+  /** 启动阶段单个任务失败后，其他已启动任务如何处理。 */
   on_task_failure?: "keep_others_running" | "cancel_all";
 }
 
 /**
- * 批量启动多个子代理任务后的返回结果。
- *
- * 返回 started 只表示任务已进入后台运行，不表示任务已经完成。
+ * 批量子代理结果，带输入下标。
  */
-export interface SubagentStartManyOutput {
-  /** 输出 schema 版本。 */
-  schema_version: 1;
-  /** 启动状态。 */
-  status: "started" | "partial";
-  /** 已启动任务。 */
-  started: SubagentStartOutput[];
-  /** 被拒绝或启动失败的任务。 */
-  rejected: Array<{
-    /** 输入数组下标。 */
-    index: number;
-    /** 传入的 agent 类型。 */
-    agent_type?: string;
-    /** 失败原因。 */
-    reason: string;
-    /** 错误码。 */
-    error_code: SubagentErrorCode;
-  }>;
-  /** 一句话摘要。 */
-  summary: string;
-}
+export type SubagentIndexedRunOutput = SubagentRunOutput & { index: number; task_id: string; title: string };
 
 /**
- * 同步批量运行多个子代理任务的输入参数。
- *
- * 与 start_many 相同的启动参数之后，会在同一个 MCP tool call 内立即 wait。
+ * 批量启动阶段拒绝项。
  */
-export interface SubagentRunManyInput extends SubagentStartManyInput {
-  /** 等待返回策略；默认 all_completed。 */
-  return_when?: SubagentWaitInput["return_when"];
-  /** 批量等待最大时间，单位秒；不影响单个任务自己的 timeout_secs。 */
-  wait_timeout_secs?: number;
-  /** 等待超时后如何处理未完成任务；默认 cancel_pending。 */
-  on_timeout?: SubagentWaitInput["on_timeout"];
+export interface SubagentRejectedItem {
+  /** 输入数组下标。 */
+  index: number;
+  /** 传入的 agent 类型。 */
+  agent_type?: string;
+  /** 失败原因。 */
+  reason: string;
+  /** 错误码。 */
+  error_code: SubagentErrorCode;
 }
 
 /**
  * 同步批量运行多个子代理任务后的返回结果。
  */
-export interface SubagentRunManyOutput extends Omit<SubagentWaitOutput, "status" | "summary"> {
-  /** 等待结果状态；failed 表示没有任何任务成功启动。 */
-  status: SubagentWaitOutput["status"] | "failed";
-  /** 已启动任务。 */
-  started: SubagentStartOutput[];
-  /** 被拒绝或启动失败的任务。 */
-  rejected: SubagentStartManyOutput["rejected"];
-  /** 一句话摘要。 */
-  summary: string;
-}
-
-/**
- * 等待一个或多个子代理任务的输入参数。
- */
-export interface SubagentWaitInput {
-  /** 要等待的任务 ID 列表。 */
-  task_ids: string[];
-  /** 等待返回策略。 */
-  return_when:
-    | "all_completed"
-    | "first_completed"
-    | "first_success"
-    | "first_failure"
-    | "any_update"
-    | "timeout_partial";
-  /** 本次等待最大时间，单位秒。 */
-  timeout_secs?: number;
-  /** 等待超时后如何处理未完成任务。 */
-  on_timeout?: "keep_running" | "cancel_pending";
-}
-
-/**
- * 等待子代理任务后的返回结果。
- */
-export interface SubagentWaitOutput {
+export interface SubagentRunManyOutput {
   /** 输出 schema 版本。 */
   schema_version: 1;
-  /** 等待结果状态。 */
-  status: "completed" | "partial" | "timeout";
-  /** 已成功或部分完成的任务结果。 */
-  completed: Array<SubagentRunOutput & { task_id?: string }>;
-  /** 已失败、超时或取消的任务结果。 */
-  failed: Array<SubagentRunOutput & { task_id?: string }>;
-  /** 仍在运行或等待的任务 ID。 */
-  pending_task_ids: string[];
+  /** 批量结果状态。 */
+  status: "completed" | "partial" | "failed" | "cancelled";
+  /** 成功或部分完成的任务结果。 */
+  completed: SubagentIndexedRunOutput[];
+  /** 失败、超时或取消的任务结果。 */
+  failed: SubagentIndexedRunOutput[];
+  /** 启动阶段被拒绝或失败的任务。 */
+  rejected: SubagentRejectedItem[];
   /** 已取消的任务 ID。 */
   cancelled_task_ids: string[];
-  /** 本次等待耗时，单位毫秒。 */
+  /** 本批任务耗时，单位毫秒。 */
   elapsed_ms: number;
   /** 一句话摘要。 */
   summary: string;
 }
 
 /**
- * 获取子代理任务结果的输入参数。
+ * 打回重写说明。
  */
-export interface SubagentResultInput {
-  /** 要查询的任务 ID。 */
-  task_id: string;
-  /** 是否包含事件日志片段。默认 false。 */
-  include_events?: boolean;
-  /** 是否包含原始输出。默认 false。 */
-  include_raw_output?: boolean;
-  /** 部分输出或日志片段最大字符数。 */
-  max_chars?: number;
+export interface SubagentRevisionCorrection {
+  /** 主 agent 为什么拒绝上一轮结果。 */
+  reason: string;
+  /** 被拒绝的上一轮结果摘要；不传时会从 task_id 指向的上一轮结果中提取。 */
+  rejected_result?: string;
+  /** 主 agent 期望如何修正。 */
+  expected_change?: string;
 }
 
 /**
- * 子代理任务当前结果。
+ * 同步打回重写输入。
+ *
+ * 推荐传 task_id：服务端会复用同一轮同步调用留下的任务元数据，但不会复用或保留
+ * 子代理进程。若 MCP Server 已重启，可改为同时传 task 和 previous_result。
  */
-export interface SubagentResultOutput {
-  /** 输出 schema 版本。 */
-  schema_version: 1;
-  /** 任务 ID。 */
-  task_id: string;
-  /** 子代理类型。 */
-  agent_type: string;
-  /** 当前任务状态。 */
-  status: SubagentTaskState;
-  /** 当前最新摘要。 */
-  latest_summary?: string;
-  /** 最终结果，如果任务已经进入终态。 */
-  result?: SubagentRunOutput;
-  /** 仍在运行时的部分输出，默认截断。 */
-  partial_output?: string;
-  /** 本地事件日志路径。 */
-  raw_event_log_path?: string;
-  /** 可选事件日志片段。 */
-  events_tail?: string;
-  /** 一句话摘要。 */
-  summary: string;
-}
-
-/**
- * 继续向已有子代理 session 发送消息的输入参数。
- */
-export interface SubagentContinueInput {
-  /** 要继续对话的任务 ID。 */
-  task_id: string;
-  /** 本轮要发送给子代理的新消息。 */
-  message: string;
-  /** 对上一轮结果的纠正说明。 */
-  correction?: {
-    /** 为什么上一轮结果不正确。 */
-    reason: string;
-    /** 被拒绝的上一轮结果摘要。 */
-    rejected_result?: string;
-    /** 期望子代理如何修正。 */
-    expected_change?: string;
-  };
-  /** 本轮新增或重新指定的文件。 */
+export interface SubagentReviseInput {
+  /** 被打回的 task id。来自 subagent_run/subagent_run_many 的结果。 */
+  task_id?: string;
+  /** 原始任务；当 task_id 不可用或需要覆盖任务描述时传入。 */
+  task?: SubagentTask;
+  /** 上一轮被拒绝的完整或摘要结果；不传时从 task_id 的结果中提取。 */
+  previous_result?: string;
+  /** 主 agent 的打回说明。 */
+  correction: SubagentRevisionCorrection;
+  /** 额外给子代理的重写指令。 */
+  message?: string;
+  /** 本轮新增或覆盖的文件列表。 */
   additional_files?: TaskFile[];
-  /** 继续对话模式。 */
-  mode?: "revise" | "fix" | "clarify" | "continue" | "custom";
+  /** 可覆盖原任务运行目录。未传时优先使用 task_id 的 cwd。 */
+  cwd?: string;
+  /** 可覆盖原任务 agent。未传时优先使用 task_id 的 agent_type。 */
+  agent_type?: string;
   /** 本轮最大运行时间，单位秒。 */
   timeout_secs?: number;
   /** 本轮无有效输出时的最大等待时间，单位秒。 */
   inactivity_timeout_secs?: number;
-  /** 本轮新增 Skill 桥接选项；不传时复用初始 session 中已注入的 Skill 上下文。 */
+  /** 本轮运行模式。默认 custom。 */
+  mode?: SubagentMode;
+  /** 允许连接的 MCP server profile 名称。 */
+  mcp_server_profiles?: string[];
+  /** 父代理 Skill 桥接选项。 */
   skills?: SubagentSkillOptions;
   /** 输出压缩选项。 */
   output?: SubagentOutputOptions;
+  /** 本任务单独指定的冲突策略。 */
+  conflict_policy?: ConflictPolicy;
 }
 
 /**
- * 继续对话启动后的返回结果。
+ * 批量打回重写的单项输入。
  */
-export interface SubagentContinueOutput {
-  /** 输出 schema 版本。 */
-  schema_version: 1;
-  /** 启动状态。 */
-  status: "started";
-  /** 任务 ID。 */
-  task_id: string;
-  /** 新的一轮 prompt turn ID。 */
-  turn_id: string;
-  /** ACP session id。 */
-  session_id: string;
-  /** 创建时间。 */
-  created_at: string;
-  /** 一句话摘要。 */
-  summary: string;
+export type SubagentReviseManyItem = Omit<SubagentReviseInput, "conflict_policy">;
+
+/**
+ * 同步批量打回重写输入。
+ */
+export interface SubagentReviseManyInput {
+  /** 要并行重写的任务列表。 */
+  revisions: SubagentReviseManyItem[];
+  /** 文件冲突处理策略。 */
+  conflict_policy?: ConflictPolicy;
+  /** 启动阶段单个重写任务失败后，其他已启动任务如何处理。 */
+  on_task_failure?: "keep_others_running" | "cancel_all";
 }
 
 /**
- * 取消一个或多个子代理任务的输入参数。
+ * 同步批量打回重写输出。
  */
-export interface SubagentCancelInput {
-  /** 要取消的任务 ID 列表。 */
-  task_ids: string[];
-  /** 取消原因。 */
-  reason?: string;
-}
-
-/**
- * 取消任务后的返回结果。
- */
-export interface SubagentCancelOutput {
-  /** 输出 schema 版本。 */
-  schema_version: 1;
-  /** 取消状态。 */
-  status: "cancelled" | "partial" | "failed";
-  /** 已取消任务。 */
-  cancelled_task_ids: string[];
-  /** 调用时已经处于终态的任务。 */
-  already_terminal_task_ids: string[];
-  /** 取消失败列表。 */
-  failed: SubagentError[];
-  /** 一句话摘要。 */
-  summary: string;
-}
-
-/**
- * 关闭子代理任务和 session 的输入参数。
- */
-export interface SubagentCloseInput {
-  /** 要关闭的任务 ID。 */
-  task_id: string;
-  /** 是否强制关闭仍在运行的任务。 */
-  force?: boolean;
-}
-
-/**
- * 关闭任务后的返回结果。
- */
-export interface SubagentCloseOutput {
-  /** 输出 schema 版本。 */
-  schema_version: 1;
-  /** 关闭状态。 */
-  status: "closed";
-  /** 任务 ID。 */
-  task_id: string;
-  /** 关闭时间。 */
-  closed_at: string;
-  /** 一句话摘要。 */
-  summary: string;
-}
-
-/**
- * 读取子代理日志的输入参数。
- */
-export interface SubagentLogsInput {
-  /** 要读取日志的任务 ID。 */
-  task_id: string;
-  /** 日志类型。 */
-  log_type?: "events" | "stderr" | "result" | "prompt" | "task";
-  /** 最大读取字节数。 */
-  max_bytes?: number;
-  /** 是否二次脱敏。默认 true。 */
-  redacted?: boolean;
-}
-
-/**
- * 读取子代理日志后的输出参数。
- */
-export interface SubagentLogsOutput {
-  /** 输出 schema 版本。 */
-  schema_version: 1;
-  /** 任务 ID。 */
-  task_id: string;
-  /** 日志类型。 */
-  log_type: "events" | "stderr" | "result" | "prompt" | "task";
-  /** 日志内容，默认截断。 */
-  content: string;
-  /** 是否发生截断。 */
-  truncated: boolean;
-  /** 一句话摘要。 */
-  summary: string;
-}
+export interface SubagentReviseManyOutput extends SubagentRunManyOutput {}

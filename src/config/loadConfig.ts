@@ -39,9 +39,6 @@ const defaultDefaults: DefaultsConfig = {
   max_prompt_chars: 120000,
   max_inline_file_chars: 30000,
   log_dir: ".subagents/runs",
-  session_ttl_secs: 1800,
-  completed_session_ttl_secs: 600,
-  max_active_sessions: 4,
   mcp_request_heartbeat_ms: 1000,
   acp_cancel_grace_ms: 500,
   process_kill_grace_ms: 500
@@ -160,9 +157,6 @@ const appConfigSchema = z.object({
     max_prompt_chars: z.number().int().positive().default(defaultDefaults.max_prompt_chars),
     max_inline_file_chars: z.number().int().positive().default(defaultDefaults.max_inline_file_chars),
     log_dir: z.string().min(1).default(defaultDefaults.log_dir),
-    session_ttl_secs: z.number().int().positive().default(defaultDefaults.session_ttl_secs),
-    completed_session_ttl_secs: z.number().int().positive().default(defaultDefaults.completed_session_ttl_secs),
-    max_active_sessions: z.number().int().positive().default(defaultDefaults.max_active_sessions),
     mcp_request_heartbeat_ms: z.number().int().min(0).default(defaultDefaults.mcp_request_heartbeat_ms),
     acp_cancel_grace_ms: z.number().int().positive().default(defaultDefaults.acp_cancel_grace_ms),
     process_kill_grace_ms: z.number().int().positive().default(defaultDefaults.process_kill_grace_ms)
@@ -406,7 +400,6 @@ function applyDefaultEnvOverrides(config: DefaultsConfig): DefaultsConfig {
     default_agent: process.env.ACP_SUBAGENT_DEFAULT_AGENT?.trim() || config.default_agent,
     timeout_secs: parsePositiveIntEnv("ACP_SUBAGENT_TIMEOUT_SECS", config.timeout_secs),
     inactivity_timeout_secs: parsePositiveIntEnv("ACP_SUBAGENT_INACTIVITY_TIMEOUT_SECS", config.inactivity_timeout_secs),
-    max_active_sessions: parsePositiveIntEnv("ACP_SUBAGENT_MAX_ACTIVE_SESSIONS", config.max_active_sessions),
     mcp_request_heartbeat_ms: parseNonNegativeIntEnv("ACP_SUBAGENT_MCP_REQUEST_HEARTBEAT_MS", config.mcp_request_heartbeat_ms),
     acp_cancel_grace_ms: parsePositiveIntEnv("ACP_SUBAGENT_ACP_CANCEL_GRACE_MS", config.acp_cancel_grace_ms),
     process_kill_grace_ms: parsePositiveIntEnv("ACP_SUBAGENT_PROCESS_KILL_GRACE_MS", config.process_kill_grace_ms),
@@ -621,9 +614,6 @@ max_depth = 2
 max_prompt_chars = 120000
 max_inline_file_chars = 30000
 log_dir = ".subagents/runs"
-session_ttl_secs = 1800
-completed_session_ttl_secs = 600
-max_active_sessions = 4
 mcp_request_heartbeat_ms = 1000
 acp_cancel_grace_ms = 500
 process_kill_grace_ms = 500

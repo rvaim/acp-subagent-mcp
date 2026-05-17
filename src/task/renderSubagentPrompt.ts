@@ -168,44 +168,89 @@ function escapeTable(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\n/g, " ");
 }
 
+
 /**
- * 将 continue 输入渲染为紧凑的后续 prompt。
+ * 将打回重写任务渲染为新子进程中的同步 prompt。
+ *
+ * 这里不会依赖上一轮 ACP session。上一轮结果和主代理的审核意见会被显式放入
+ * prompt，从而在保留“打回重写”语义的同时，避免完成后继续保留子代理进程。
  */
-export function renderSubagentContinuePrompt(input: {
-  /** 继续模式。 */
-  mode: "revise" | "fix" | "clarify" | "continue" | "custom";
+export function renderSubagentRevisionPrompt(input: {
+  /** 原始任务。 */
+  task: SubagentTask;
+  /** 重写模式。 */
+  mode: SubagentMode;
+  /** 上一轮被拒绝的结果。 */
+  previousResult: string;
   /** 主代理的新消息。 */
-  message: string;
-  /** 可选纠正说明。 */
-  correction?: {
+  message?: string;
+  /** 纠正说明。 */
+  correction: {
     reason: string;
     rejected_result?: string;
     expected_change?: string;
   };
-  /** 本轮新增文件。 */
+  /** 本轮新增或覆盖后的文件。 */
   files: ResolvedTaskFile[];
+  /** agent 配置中的系统提示词。 */
+  systemPrompt?: string;
+  /** 有效权限。 */
+  permissions: EffectivePermissions;
   /** 输出压缩选项。 */
   output: Required<Pick<SubagentOutputOptions, "mode" | "max_result_chars" | "max_findings">>;
   /** 父代理 Skill 桥接上下文。 */
   skills?: SkillPromptContext;
 }): RenderedSubagentPrompt {
   const lines: string[] = [];
-  lines.push("# 子代理继续任务");
+  lines.push("# 子代理打回重写任务");
   lines.push("");
-  lines.push(`模式：${input.mode}`);
-  lines.push("请基于同一个 ACP session 的上下文继续，不要重复解释已完成内容；只返回最终 JSON。");
-  lines.push("");
-  lines.push("## 主代理消息");
-  lines.push(input.message.trim());
-  lines.push("");
-
-  if (input.correction) {
-    lines.push("## 纠正说明");
-    lines.push(`原因：${input.correction.reason}`);
-    if (input.correction.rejected_result) lines.push(`被拒绝的上一轮结果摘要：${input.correction.rejected_result}`);
-    if (input.correction.expected_change) lines.push(`期望修正：${input.correction.expected_change}`);
+  if (input.systemPrompt?.trim()) {
+    lines.push("## 系统约束");
+    lines.push(input.systemPrompt.trim());
     lines.push("");
   }
+
+  lines.push("## 工作模式");
+  lines.push(`模式：${input.mode}`);
+  lines.push(`权限：read=${input.permissions.canReadFiles ? "allow" : "deny"}, write=${input.permissions.canWriteFiles ? "allow" : "deny"}, execute=${input.permissions.canExecuteCommands ? "allow" : "deny"}, network=${input.permissions.canUseNetwork ? "allow" : "deny"}`);
+  lines.push("");
+
+  lines.push("## 原始任务");
+  lines.push(`标题：${input.task.title}`);
+  lines.push(`目标：${input.task.goal}`);
+  appendOptionalBlock(lines, "原始背景", input.task.background);
+  appendList(lines, "原始指令", input.task.instructions);
+  appendList(lines, "原始约束", input.task.constraints);
+  appendList(lines, "原始成功标准", input.task.success_criteria);
+
+  if (input.task.parent_context) {
+    lines.push("## 父代理上下文摘要");
+    if (input.task.parent_context.parent_agent) lines.push(`父代理：${input.task.parent_context.parent_agent}`);
+    if (input.task.parent_context.conversation_summary) lines.push(input.task.parent_context.conversation_summary);
+    appendList(lines, "前序发现", input.task.parent_context.previous_findings);
+    lines.push("");
+  }
+
+  lines.push("## 上一轮被拒绝的结果");
+  lines.push(input.previousResult.trim());
+  lines.push("");
+
+  lines.push("## 主代理审核与打回说明");
+  lines.push(`拒绝原因：${input.correction.reason}`);
+  if (input.correction.rejected_result) lines.push(`被拒绝结果摘要：${input.correction.rejected_result}`);
+  if (input.correction.expected_change) lines.push(`期望修正：${input.correction.expected_change}`);
+  if (input.message?.trim()) {
+    lines.push("");
+    lines.push("## 额外重写指令");
+    lines.push(input.message.trim());
+  }
+  lines.push("");
+
+  lines.push("## 重写要求");
+  lines.push("- 你需要基于原始任务重新产出完整结果，而不是只解释修改点。");
+  lines.push("- 明确修正主代理指出的问题；如果无法完全满足，要在 risks 或 errors 中说明。");
+  lines.push("- 不要依赖上一轮 ACP session；所有必要上下文都在本 prompt 中。");
+  lines.push("");
 
   appendFiles(lines, input.files);
   appendSkillContext(lines, input.skills);

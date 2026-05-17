@@ -8,7 +8,7 @@ import { selectPermissionOption } from "../runtime/permissions.js";
 import { resolveAcpAbsolutePathInsideCwd, toDisplayRelativePath } from "../runtime/security.js";
 import { SubagentRuntimeError } from "../runtime/errors.js";
 import type { RunLogger } from "../runtime/logs.js";
-import { terminateProcessTree } from "../runtime/processManager.js";
+import { terminateProcessTree, type ProcessEnvMarker } from "../runtime/processManager.js";
 import type { AcpContentBlock, AcpInitializeResult, AcpNewSessionResult, AcpPromptResult } from "./types.js";
 import { AcpEventAggregator } from "./eventAggregator.js";
 import { getPackageVersion } from "../version.js";
@@ -33,6 +33,8 @@ export interface GenericAcpClientOptions {
   acpCancelGraceMs: number;
   /** SIGKILL grace period。 */
   processKillGraceMs: number;
+  /** 用于清理逃逸孙进程的环境变量标记。 */
+  processEnvMarker?: ProcessEnvMarker;
 }
 
 /**
@@ -174,6 +176,8 @@ export class GenericAcpClient {
   private readonly connection: acp.ClientSideConnection;
   /** ACP 客户端侧能力处理器。 */
   private readonly clientHandler: SubagentAcpClientHandler;
+  /** 用于清理逃逸孙进程的环境变量标记。 */
+  private readonly processEnvMarker?: ProcessEnvMarker;
   /** initialize 返回结果。 */
   private initializeResult?: AcpInitializeResult;
 
@@ -187,6 +191,7 @@ export class GenericAcpClient {
     this.logger = options.logger;
     this.acpCancelGraceMs = options.acpCancelGraceMs;
     this.processKillGraceMs = options.processKillGraceMs;
+    this.processEnvMarker = options.processEnvMarker;
 
     this.clientHandler = new SubagentAcpClientHandler({
       cwd: options.cwd,
@@ -345,7 +350,8 @@ export class GenericAcpClient {
   async shutdown(): Promise<void> {
     await terminateProcessTree(this.child, {
       sigtermGraceMs: this.acpCancelGraceMs,
-      sigkillGraceMs: this.processKillGraceMs
+      sigkillGraceMs: this.processKillGraceMs,
+      envMarker: this.processEnvMarker
     });
   }
 

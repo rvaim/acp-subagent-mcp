@@ -79,12 +79,6 @@ export interface DefaultsConfig {
   max_inline_file_chars: number;
   /** 日志目录，相对 cwd 时写入项目内。 */
   log_dir: string;
-  /** session TTL。 */
-  session_ttl_secs: number;
-  /** 完成后 session TTL。 */
-  completed_session_ttl_secs: number;
-  /** 最大活跃任务数。 */
-  max_active_sessions: number;
   /** 长 MCP request 期间向 Host 发送 progress heartbeat 的间隔；0 表示关闭。 */
   mcp_request_heartbeat_ms: number;
   /** ACP cancel 后等待 agent 自行停止的毫秒数。 */
