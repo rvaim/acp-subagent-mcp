@@ -676,7 +676,7 @@ export function renderClaudeDesktopConfigJson(): string {
     mcpServers: {
       "acp-subagent": {
         command: "npx",
-        args: ["-y", "acp-subagent-mcp"],
+        args: ["-y", "@rvaim/acp-subagent-mcp"],
         env: {
           ACP_SUBAGENT_DEFAULT_AGENT: "claude",
           ACP_SUBAGENT_ENV_POLICY: "all",
@@ -698,7 +698,7 @@ export function renderClaudeDesktopConfigJson(): string {
 export function renderCodexConfigToml(): string {
   return `[mcp_servers.acp-subagent]
 command = "npx"
-args = ["-y", "acp-subagent-mcp"]
+args = ["-y", "@rvaim/acp-subagent-mcp"]
 # 可选：Codex 启动 stdio MCP server 时显式转发这些宿主环境变量。
 # 如果你的子代理依赖本地登录、代理、证书或 API key，请把对应变量列在这里。
 env_vars = [
@@ -733,7 +733,7 @@ export function renderGenericMcpConfigJson(): string {
       "acp-subagent": {
         type: "stdio",
         command: "npx",
-        args: ["-y", "acp-subagent-mcp"],
+        args: ["-y", "@rvaim/acp-subagent-mcp"],
         env: {
           ACP_SUBAGENT_DEFAULT_AGENT: "claude",
           ACP_SUBAGENT_ENV_POLICY: "all",

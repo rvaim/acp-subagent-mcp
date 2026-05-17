@@ -1,5 +1,5 @@
 {
-  "name": "acp-subagent-mcp",
+  "name": "@rvaim/acp-subagent-mcp",
   "version": "0.1.0",
   "private": false,
   "type": "module",
@@ -38,7 +38,7 @@
     "access": "public"
   },
   "files": [
-    "dist/",
+    "dist/src/",
     "examples/",
     "doc/",
     "README.md",

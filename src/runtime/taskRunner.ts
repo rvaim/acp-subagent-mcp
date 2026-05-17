@@ -590,11 +590,11 @@ function launchPromptTurn(options: {
       active.currentInactivityTimeoutMs = undefined;
       active.completedAt = new Date();
       active.currentTurnId = undefined;
-      deps.registry.notify(active.taskId);
 
       if (!active.keepAlive || active.status === "failed" || active.status === "timeout" || active.status === "cancelled") {
         await cleanupActiveTask(active, deps, true);
       } else {
+        deps.registry.notify(active.taskId);
         scheduleCompletedSessionTtl(active, deps);
       }
     }

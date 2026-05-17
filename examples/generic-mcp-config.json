@@ -5,7 +5,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "acp-subagent-mcp"
+        "@rvaim/acp-subagent-mcp"
       ],
       "env": {
         "ACP_SUBAGENT_DEFAULT_AGENT": "claude",

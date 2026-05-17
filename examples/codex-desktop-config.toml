@@ -4,7 +4,7 @@
 
 [mcp_servers.acp-subagent]
 command = "npx"
-args = ["-y", "acp-subagent-mcp"]
+args = ["-y", "@rvaim/acp-subagent-mcp"]
 env_vars = [
   "PATH",
   "HOME",

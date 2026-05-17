@@ -4,7 +4,7 @@
 
 [mcp_servers.acp-subagent]
 command = "npx"
-args = ["-y", "acp-subagent-mcp"]
+args = ["-y", "@rvaim/acp-subagent-mcp"]
 # Codex 启动 stdio MCP server 时，只有列在 env_vars 里的宿主变量会被转发。
 env_vars = [
   "PATH",
