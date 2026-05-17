@@ -7,7 +7,10 @@ import { rejectDynamicMcpServers } from "../runtime/security.js";
 import { subagentStartManyInputSchema } from "./schemas.js";
 
 /**
- * 处理 subagent_start_many：并行启动多个任务。
+ * 处理 subagent_start_many：批量启动多个任务。
+ *
+ * 启动阶段按输入顺序逐个创建 session；每个任务启动成功后，其 prompt turn
+ * 会在后台运行，因此已启动任务之间的执行阶段是并发的。
  */
 export async function handleSubagentStartMany(rawInput: unknown, deps: SubagentTaskRunnerDependencies): Promise<SubagentStartManyOutput> {
   rejectDynamicMcpServers(rawInput);

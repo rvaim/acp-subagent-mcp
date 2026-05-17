@@ -402,7 +402,7 @@ export interface SubagentStartOutput {
 }
 
 /**
- * 并行启动多个子代理任务的单项输入。
+ * 批量启动多个子代理任务的单项输入。
  */
 export interface SubagentStartManyItem extends Omit<SubagentStartInput, "conflict_policy"> {
   /** 单项任务是否保留 session。 */
@@ -410,7 +410,9 @@ export interface SubagentStartManyItem extends Omit<SubagentStartInput, "conflic
 }
 
 /**
- * 并行启动多个子代理任务的输入参数。
+ * 批量启动多个子代理任务的输入参数。
+ *
+ * 启动阶段会按 tasks 顺序逐个完成初始化；启动成功后的任务在后台并发运行。
  */
 export interface SubagentStartManyInput {
   /** 要并行启动的任务列表。 */
@@ -422,7 +424,9 @@ export interface SubagentStartManyInput {
 }
 
 /**
- * 并行启动多个子代理任务后的返回结果。
+ * 批量启动多个子代理任务后的返回结果。
+ *
+ * 返回 started 只表示任务已进入后台运行，不表示任务已经完成。
  */
 export interface SubagentStartManyOutput {
   /** 输出 schema 版本。 */

@@ -40,6 +40,7 @@
   "files": [
     "dist/",
     "examples/",
+    "doc/",
     "README.md",
     "LICENSE",
     "package.json"

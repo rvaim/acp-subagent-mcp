@@ -152,7 +152,7 @@ function buildToolDefinitions(): Tool[] {
     } as unknown as Tool,
     {
       name: "subagent_start_many",
-      description: "并行启动多个子代理任务。",
+      description: "批量启动多个任务；启动阶段逐个建会话，运行阶段并发执行。",
       inputSchema: subagentStartManyInputJsonSchema,
       outputSchema: genericToolOutputJsonSchema,
       annotations: { title: "Start many subagents", readOnlyHint: false, destructiveHint: true, idempotentHint: false }
