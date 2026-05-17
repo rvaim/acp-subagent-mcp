@@ -221,7 +221,7 @@ export class GenericAcpClient {
         terminal: false
       },
       clientInfo: {
-        name: "acp-subagent-mcp",
+        name: "@rvaim/acp-subagent-mcp",
         title: "ACP Subagent MCP Server",
         version: getPackageVersion()
       }

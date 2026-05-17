@@ -608,7 +608,7 @@ function parseJsonObjectEnv<T extends Record<string, unknown>>(name: string, fal
  * 渲染一个可复制的默认 TOML 配置，用于高级用户落盘修改。
  */
 export function renderDefaultConfigToml(): string {
-  return `# acp-subagent-mcp 默认配置示例
+  return `# @rvaim/acp-subagent-mcp 默认配置示例
 #
 # 普通用户不需要创建这个文件；直接通过 MCP Host / Claude Desktop 启动即可。
 # 只有需要严格限制工作区、增加子代理或覆盖命令时，才需要落盘配置。
@@ -749,7 +749,7 @@ export function renderGenericMcpConfigJson(): string {
       "acp-subagent": {
         type: "stdio",
         command: "npx",
-        args: ["-y", "acp-subagent-mcp"],
+        args: ["-y", "@rvaim/acp-subagent-mcp"],
         env: {
           ACP_SUBAGENT_DEFAULT_AGENT: "claude",
           ACP_SUBAGENT_ENV_POLICY: "all",

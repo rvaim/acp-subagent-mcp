@@ -11,7 +11,7 @@ async function main(): Promise<void> {
 
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write([
-      "acp-subagent-mcp",
+      "@rvaim/acp-subagent-mcp",
       "",
       "用法：",
       "  acp-subagent-mcp                       # 使用默认配置启动 MCP Server",

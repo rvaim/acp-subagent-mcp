@@ -1,4 +1,4 @@
-# acp-subagent-mcp
+# @rvaim/acp-subagent-mcp
 
 通用 ACP 子代理 MCP Server。主 agent 通过 MCP tools 派发任务，本服务在内部拉起支持 ACP 的子代理，负责会话、并发、多轮、取消、超时、日志、安全校验、Skill 桥接和低 token 结果返回。
 
@@ -50,13 +50,13 @@
 ### 方式一：直接用 npx
 
 ```bash
-npx -y acp-subagent-mcp
+npx -y @rvaim/acp-subagent-mcp
 ```
 
 ### 方式二：全局安装
 
 ```bash
-npm install -g acp-subagent-mcp
+npm install -g @rvaim/acp-subagent-mcp
 acp-subagent-mcp
 ```
 
@@ -242,7 +242,7 @@ acp-subagent-mcp --print-default-config > agents.toml
   "mcpServers": {
     "acp-subagent": {
       "command": "npx",
-      "args": ["-y", "acp-subagent-mcp", "--config", "/absolute/path/to/agents.toml"]
+      "args": ["-y", "@rvaim/acp-subagent-mcp", "--config", "/absolute/path/to/agents.toml"]
     }
   }
 }

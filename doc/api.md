@@ -1,6 +1,6 @@
 # API 文档：MCP tools 输入输出
 
-本文描述 `acp-subagent-mcp` 暴露给主 agent 的 MCP tools。所有工具返回 JSON object，同时也会被包装为 MCP text content，便于不支持 output schema 的 Host 使用。
+本文描述 `@rvaim/acp-subagent-mcp` 暴露给主 agent 的 MCP tools。所有工具返回 JSON object，同时也会被包装为 MCP text content，便于不支持 output schema 的 Host 使用。
 
 ## 通用概念
 

@@ -1,4 +1,4 @@
-# acp-subagent-mcp 高级配置示例。
+# @rvaim/acp-subagent-mcp 高级配置示例。
 # 一般用户不需要这个文件；默认配置已经使用 claude-agent-acp 作为子代理命令。
 # 注意：本 MCP 包不会自动安装任何具体 ACP adapter；请确保该命令已在 PATH，或通过环境变量覆盖。
 

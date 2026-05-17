@@ -45,7 +45,7 @@ export async function startMcpServer(config: AppConfig): Promise<void> {
   const deps: SubagentTaskRunnerDependencies = { config, concurrency, registry };
   const server = new Server(
     {
-      name: "acp-subagent-mcp",
+      name: "@rvaim/acp-subagent-mcp",
       version: getPackageVersion()
     },
     {

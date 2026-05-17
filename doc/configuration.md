@@ -87,8 +87,8 @@ network = "deny"
 
 子代理能看到哪些环境变量，由两层决定：
 
-1. MCP Host 先决定哪些环境变量传给 `acp-subagent-mcp` 进程。
-2. `acp-subagent-mcp` 再根据 `env_policy` 决定传给子代理进程。
+1. MCP Host 先决定哪些环境变量传给 `@rvaim/acp-subagent-mcp` 进程。
+2. `@rvaim/acp-subagent-mcp` 再根据 `env_policy` 决定传给子代理进程。
 
 默认：
 
