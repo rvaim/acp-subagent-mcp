@@ -1,6 +1,7 @@
 import type { SubagentStartManyInput, SubagentStartManyOutput, SubagentStartOutput } from "../task/types.js";
 import type { SubagentTaskRunnerDependencies } from "../runtime/taskRunner.js";
 import { cancelActiveTask, startSubagentTask } from "../runtime/taskRunner.js";
+import { SubagentRuntimeError } from "../runtime/errors.js";
 import { toSubagentError } from "../runtime/errors.js";
 import { rejectDynamicMcpServers } from "../runtime/security.js";
 import { subagentStartManyInputSchema } from "./schemas.js";
@@ -16,6 +17,11 @@ export async function handleSubagentStartMany(rawInput: unknown, deps: SubagentT
   const rejected: SubagentStartManyOutput["rejected"] = [];
 
   for (const [index, item] of input.tasks.entries()) {
+    if (deps.requestSignal?.aborted) {
+      await cancelStartedTasks(startedTaskIds, deps, "MCP start_many call 已取消");
+      throw new SubagentRuntimeError("cancelled", "MCP start_many call 已取消", { recoverable: true });
+    }
+
     try {
       const active = await startSubagentTask({ input: item, keepAlive: item.keep_alive ?? false, conflictPolicy: input.conflict_policy }, deps);
       startedTaskIds.push(active.taskId);
@@ -49,4 +55,15 @@ export async function handleSubagentStartMany(rawInput: unknown, deps: SubagentT
     rejected,
     summary: `已启动 ${started.length} 个子代理任务，拒绝 ${rejected.length} 个。`
   };
+}
+
+
+/**
+ * 取消 start_many 已经启动成功的任务。
+ */
+async function cancelStartedTasks(taskIds: string[], deps: SubagentTaskRunnerDependencies, reason: string): Promise<void> {
+  await Promise.allSettled(taskIds.map(async (taskId) => {
+    const task = deps.registry.get(taskId);
+    if (task) await cancelActiveTask(task, reason).catch(() => undefined);
+  }));
 }

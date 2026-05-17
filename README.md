@@ -656,6 +656,7 @@ mock agent smoke test 覆盖：
 - `subagent_result`
 - `subagent_start_many`
 - `subagent_close`
+- MCP request cancellation：模拟 Host 手动停止 `subagent_run` 和 `subagent_wait` 时，确认子代理会被取消并清理进程树。
 
 ## 发布到 npm
 
@@ -690,7 +691,9 @@ npm publish --access public
 - inline/snippet、Skill inline 和 prompt 都有限制。
 - 子进程默认 `env_policy=all`，会继承 MCP Server 进程可见的全部环境变量；生产环境可改用 `allowlist`。
 - 日志默认脱敏。
-- 超时、取消、关闭都会清理子进程树。
+- 超时、显式 `subagent_cancel`、`subagent_close(force=true)` 都会清理子进程树。
+- Host 手动停止正在执行的 `subagent_run` 或 `subagent_wait` 时，MCP SDK 提供的 request `AbortSignal` 会被级联到 ACP `session/cancel`，随后执行 SIGTERM/SIGKILL 清理，避免子代理后台残留。
+- MCP transport 关闭、Node 收到 SIGINT/SIGTERM、进程即将退出时，会兜底关闭所有活跃子代理。
 
 ## 已知边界
 

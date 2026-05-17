@@ -18,6 +18,8 @@ export async function handleSubagentWait(rawInput: unknown, deps: SubagentTaskRu
     if (!deps.registry.get(taskId)) throw new SubagentRuntimeError("invalid_input", `任务不存在：${taskId}`);
   }
 
+  throwIfAbortedAndCancel(input, deps);
+
   while (true) {
     const snapshot = input.task_ids.map((taskId) => deps.registry.get(taskId)!);
     const conditionMet = isWaitConditionMet(input.return_when, snapshot, initialSeq);
@@ -31,8 +33,73 @@ export async function handleSubagentWait(rawInput: unknown, deps: SubagentTaskRu
       return buildWaitOutput(input, deps, Date.now() - startedAt, !conditionMet && elapsed >= timeoutMs);
     }
 
-    await deps.registry.waitForChange(Math.min(1000, timeoutMs - elapsed));
+    await waitForChangeOrAbort(input, deps, Math.min(1000, timeoutMs - elapsed));
   }
+}
+
+/**
+ * 等待任务变化，同时响应 MCP request cancellation。
+ *
+ * Host 手动停止当前 wait 调用时，默认视为“用户不再需要这些子代理继续运行”，
+ * 因此会取消本次 wait 覆盖的仍在运行任务，避免后台继续占用资源。
+ */
+async function waitForChangeOrAbort(input: SubagentWaitInput, deps: SubagentTaskRunnerDependencies, timeoutMs: number): Promise<void> {
+  const signal = deps.requestSignal;
+  if (!signal) {
+    await deps.registry.waitForChange(timeoutMs);
+    return;
+  }
+
+  throwIfAbortedAndCancel(input, deps);
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", abort);
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      void cancelWaitTasks(input, deps, "MCP wait call 已取消").finally(() => {
+        reject(new SubagentRuntimeError("cancelled", "MCP wait call 已取消", { recoverable: true }));
+      });
+    };
+
+    signal.addEventListener("abort", abort, { once: true });
+    deps.registry.waitForChange(timeoutMs).then(
+      () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      }
+    );
+  });
+}
+
+/**
+ * 若 wait 调用进入时已经被取消，立即取消关联任务并抛出错误。
+ */
+function throwIfAbortedAndCancel(input: SubagentWaitInput, deps: SubagentTaskRunnerDependencies): void {
+  const signal = deps.requestSignal;
+  if (!signal?.aborted) return;
+  void cancelWaitTasks(input, deps, "MCP wait call 已取消");
+  throw new SubagentRuntimeError("cancelled", "MCP wait call 已取消", { recoverable: true });
+}
+
+/**
+ * 取消本次 wait 关注的仍在运行任务。
+ */
+async function cancelWaitTasks(input: SubagentWaitInput, deps: SubagentTaskRunnerDependencies, reason: string): Promise<void> {
+  await Promise.allSettled(input.task_ids.map(async (taskId) => {
+    const task = deps.registry.get(taskId);
+    if (task && !isFinishedTaskState(task.status)) await cancelActiveTask(task, reason).catch(() => undefined);
+  }));
 }
 
 /**

@@ -48,6 +48,14 @@ export interface SubagentTaskRunnerDependencies {
   concurrency: ConcurrencyManager;
   /** 任务注册表。 */
   registry: TaskRegistry;
+  /**
+   * 当前 MCP tool call 的取消信号。
+   *
+   * MCP Host 手动停止会话、发送 notifications/cancelled 或 stdio 断开时，
+   * 官方 MCP SDK 会 abort 该信号。运行中的同步任务、wait 等必须把它
+   * 级联到 ACP session/cancel 和子进程树清理，避免后台孤儿子代理。
+   */
+  requestSignal?: AbortSignal;
 }
 
 /**
@@ -73,6 +81,7 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
   const normalizedInput: SubagentStartInput = { ...input, agent_type: agentType };
   assertKnownAgent(deps.config, agentType);
   const currentDepth = assertDepthAllowed(deps.config.defaults.max_depth);
+  throwIfRequestAborted(deps);
 
   const taskId = options.taskId ?? `task_${randomUUID().slice(0, 12)}`;
   const agent = deps.config.agents[agentType];
@@ -83,6 +92,7 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
 
   let logger: RunLogger | undefined;
   let client: GenericAcpClient | undefined;
+  let detachRequestAbort: (() => void) | undefined;
 
   try {
     const workspace = await prepareExecutionWorkspace({
@@ -145,6 +155,7 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
       updateSeq: 0
     };
     deps.registry.add(active);
+    detachRequestAbort = bindRequestAbortToTask(active, deps, "MCP tool call 已取消，正在停止子代理");
 
     const env = buildAgentEnv(agent, currentDepth, executionCwd);
     const spawned = spawnAgentProcess({
@@ -162,6 +173,9 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
       logger,
       onActivity: () => {
         active.lastActivityAt = new Date();
+        if (active.timeoutController && active.currentInactivityTimeoutMs) {
+          active.timeoutController.markActivity(active.currentInactivityTimeoutMs);
+        }
         active.partialOutput = active.client?.getPartialText() ?? active.partialOutput;
         active.toolCalls = active.client?.getToolCalls() ?? active.toolCalls;
         active.filesTouched = active.client?.getFilesTouched() ?? active.filesTouched;
@@ -173,9 +187,13 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
     });
     active.client = client;
 
-    await client.initialize();
+    await raceWithRequestAbort(client.initialize(), deps, async () => {
+      await client?.shutdown().catch(() => undefined);
+    });
     const mcpServers = resolveMcpServerProfiles(deps.config, agentType, normalizedInput.mcp_server_profiles);
-    const session = await client.newSession({ cwd: executionCwd, mcpServers });
+    const session = await raceWithRequestAbort(client.newSession({ cwd: executionCwd, mcpServers }), deps, async () => {
+      await client?.shutdown().catch(() => undefined);
+    });
     active.sessionId = session.sessionId;
     scheduleSessionTtl(active, deps);
 
@@ -190,8 +208,11 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
       turnKind: "initial"
     });
 
+    detachRequestAbort?.();
+    detachRequestAbort = undefined;
     return active;
   } catch (error) {
+    detachRequestAbort?.();
     releaseConcurrency();
     await client?.shutdown().catch(() => undefined);
     await logger?.writeJson("result.json", failureOutputFromError(agentType, error, Date.now(), undefined, logger, originalCwd)).catch(() => undefined);
@@ -204,11 +225,16 @@ export async function startSubagentTask(options: StartTaskOptions, deps: Subagen
  */
 export async function runSubagentTask(input: SubagentStartInput, deps: SubagentTaskRunnerDependencies): Promise<SubagentRunOutput> {
   const active = await startSubagentTask({ input, keepAlive: false, conflictPolicy: input.conflict_policy }, deps);
-  await active.currentTurnPromise;
-  if (!active.result) {
-    throw new SubagentRuntimeError("internal_error", "子代理任务结束但没有生成结果");
+  const detachRequestAbort = bindRequestAbortToTask(active, deps, "MCP tool call 已取消，正在停止子代理");
+  try {
+    await active.currentTurnPromise;
+    if (!active.result) {
+      throw new SubagentRuntimeError("internal_error", "子代理任务结束但没有生成结果");
+    }
+    return active.result;
+  } finally {
+    detachRequestAbort();
   }
-  return active.result;
 }
 
 /**
@@ -252,6 +278,8 @@ export async function continueSubagentTask(input: SubagentContinueInput, deps: S
     skillContext,
     turnKind: "continue"
   });
+  const detachRequestAbort = bindRequestAbortToTask(active, deps, "MCP continue call 已取消，正在停止本轮子代理任务");
+  active.currentTurnPromise?.finally(detachRequestAbort).catch(() => undefined);
 
   return {
     schema_version: 1,
@@ -301,6 +329,116 @@ export async function closeActiveTask(active: ActiveSubagentTask, deps: Subagent
 }
 
 /**
+ * 关闭所有活跃任务。
+ *
+ * 该函数用于 MCP transport 断开、进程收到退出信号或测试主动清理。
+ * 它会对每个未终态任务执行 force close，从而触发：
+ * ACP session/cancel -> AbortSignal -> 子进程树 SIGTERM/SIGKILL。
+ */
+export async function shutdownAllActiveTasks(deps: SubagentTaskRunnerDependencies, reason: string): Promise<void> {
+  const tasks = deps.registry.list();
+  await Promise.allSettled(tasks.map((task) => closeActiveTask(task, deps, true).catch(async () => {
+    task.errors.push(makeSubagentError("cancelled", reason, { recoverable: true }));
+    await cleanupActiveTask(task, deps, true).catch(() => undefined);
+  })));
+}
+
+/**
+ * 若当前 MCP 请求已经被取消，则立即抛出可恢复的取消错误。
+ */
+function throwIfRequestAborted(deps: SubagentTaskRunnerDependencies): void {
+  if (deps.requestSignal?.aborted) {
+    throw makeRequestCancelledError(deps.requestSignal, "MCP tool call 已取消");
+  }
+}
+
+/**
+ * 将 MCP 请求取消信号绑定到指定任务。
+ *
+ * 绑定后，只要主 agent 手动停止当前 tool call，或 MCP transport 关闭，
+ * 该任务就会收到 cancel，并在 turn 的 finally 中执行进程树清理。
+ */
+function bindRequestAbortToTask(active: ActiveSubagentTask, deps: SubagentTaskRunnerDependencies, fallbackReason: string): () => void {
+  const signal = deps.requestSignal;
+  if (!signal) return () => undefined;
+
+  const onAbort = () => {
+    const reason = requestAbortReason(signal, fallbackReason);
+    void cancelActiveTask(active, reason).catch(async () => {
+      await cleanupActiveTask(active, deps, true).catch(() => undefined);
+    });
+  };
+
+  if (signal.aborted) {
+    onAbort();
+    return () => undefined;
+  }
+
+  signal.addEventListener("abort", onAbort, { once: true });
+  return () => signal.removeEventListener("abort", onAbort);
+}
+
+/**
+ * 将初始化、创建 session 等启动阶段 Promise 与 MCP 请求取消信号竞争。
+ *
+ * 这些阶段还没有进入 prompt turn，不能依赖 RunTimeoutController；因此必须单独
+ * 监听 MCP cancellation，并主动清理已经启动的 ACP 子进程。
+ */
+async function raceWithRequestAbort<T>(promise: Promise<T>, deps: SubagentTaskRunnerDependencies, onAbort: () => Promise<void>): Promise<T> {
+  const signal = deps.requestSignal;
+  if (!signal) return promise;
+  if (signal.aborted) {
+    await onAbort();
+    throw makeRequestCancelledError(signal, "MCP tool call 已取消");
+  }
+
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", abort);
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      promise.catch(() => undefined);
+      void onAbort().finally(() => reject(makeRequestCancelledError(signal, "MCP tool call 已取消")));
+    };
+
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      }
+    );
+  });
+}
+
+/**
+ * 构造 MCP 请求取消错误。
+ */
+function makeRequestCancelledError(signal: AbortSignal, fallbackReason: string): SubagentRuntimeError {
+  return new SubagentRuntimeError("cancelled", requestAbortReason(signal, fallbackReason), { recoverable: true });
+}
+
+/**
+ * 从 AbortSignal 中提取适合写入日志的取消原因。
+ */
+function requestAbortReason(signal: AbortSignal, fallbackReason: string): string {
+  const reason = signal.reason;
+  if (reason instanceof Error && reason.message) return reason.message;
+  if (typeof reason === "string" && reason.length > 0) return reason;
+  return fallbackReason;
+}
+
+/**
  * 启动并记录一轮 prompt。返回 turn id。
  */
 function launchPromptTurn(options: {
@@ -338,6 +476,7 @@ function launchPromptTurn(options: {
   const inactivityMs = (options.inactivityTimeoutSecs ?? deps.config.defaults.inactivity_timeout_secs) * 1000;
   const timeoutController = new RunTimeoutController({ timeoutMs, inactivityTimeoutMs: inactivityMs });
   active.timeoutController = timeoutController;
+  active.currentInactivityTimeoutMs = inactivityMs;
 
   active.currentTurnPromise = (async () => {
     let finalStatus: SubagentRunStatus = "failed";
@@ -407,6 +546,7 @@ function launchPromptTurn(options: {
     } finally {
       timeoutController.dispose();
       active.timeoutController = undefined;
+      active.currentInactivityTimeoutMs = undefined;
       active.completedAt = new Date();
       active.currentTurnId = undefined;
       deps.registry.notify(active.taskId);

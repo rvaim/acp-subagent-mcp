@@ -76,14 +76,31 @@ export function spawnAgentProcess(options: {
  * 尝试终止子进程树。
  */
 export async function terminateProcessTree(child: ChildProcessWithoutNullStreams, options: { sigtermGraceMs: number; sigkillGraceMs: number }): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (child.exitCode !== null || child.signalCode !== null) {
+    destroyChildStdio(child);
+    return;
+  }
 
-  sendSignal(child, "SIGTERM");
-  await delay(options.sigtermGraceMs);
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    if (process.platform === "win32") {
+      child.kill("SIGTERM");
+      await delay(options.sigtermGraceMs);
+      if (child.exitCode === null && child.signalCode === null) {
+        await taskkillProcessTree(child.pid);
+        await delay(options.sigkillGraceMs);
+      }
+      return;
+    }
 
-  sendSignal(child, "SIGKILL");
-  await delay(options.sigkillGraceMs);
+    sendSignal(child, "SIGTERM");
+    await delay(options.sigtermGraceMs);
+    if (child.exitCode !== null || child.signalCode !== null) return;
+
+    sendSignal(child, "SIGKILL");
+    await delay(options.sigkillGraceMs);
+  } finally {
+    destroyChildStdio(child);
+  }
 }
 
 /**
@@ -197,6 +214,27 @@ function sendSignal(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signal
  */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Windows 下使用 taskkill 递归杀掉进程树。
+ */
+function taskkillProcessTree(pid: number | undefined): Promise<void> {
+  if (!pid) return Promise.resolve();
+  return new Promise((resolve) => {
+    const killer = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+    killer.once("exit", () => resolve());
+    killer.once("error", () => resolve());
+  });
+}
+
+/**
+ * 销毁子进程 stdio，避免 MCP Server 因残留 pipe 句柄无法退出。
+ */
+function destroyChildStdio(child: ChildProcessWithoutNullStreams): void {
+  child.stdin.destroy();
+  child.stdout.destroy();
+  child.stderr.destroy();
 }
 
 /**

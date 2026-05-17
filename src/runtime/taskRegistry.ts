@@ -80,6 +80,8 @@ export interface ActiveSubagentTask {
   currentTurnPromise?: Promise<void>;
   /** 当前超时控制器。 */
   timeoutController?: RunTimeoutController;
+  /** 当前 turn 使用的 inactivity timeout 毫秒数，用于收到 agent update 时重置计时器。 */
+  currentInactivityTimeoutMs?: number;
   /** 任务原始结构。 */
   task: SubagentTask;
   /** 输出压缩选项。 */

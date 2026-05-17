@@ -4,6 +4,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@model
 import type { AppConfig } from "./config/types.js";
 import { ConcurrencyManager } from "./runtime/concurrency.js";
 import { TaskRegistry } from "./runtime/taskRegistry.js";
+import { shutdownAllActiveTasks, type SubagentTaskRunnerDependencies } from "./runtime/taskRunner.js";
 import { handleSubagentList } from "./tools/subagentList.js";
 import { handleSubagentRun } from "./tools/subagentRun.js";
 import { handleSubagentStart } from "./tools/subagentStart.js";
@@ -39,7 +40,7 @@ import {
 export async function startMcpServer(config: AppConfig): Promise<void> {
   const concurrency = new ConcurrencyManager();
   const registry = new TaskRegistry();
-  const deps = { config, concurrency, registry };
+  const deps: SubagentTaskRunnerDependencies = { config, concurrency, registry };
   const server = new Server(
     {
       name: "acp-subagent-mcp",
@@ -56,21 +57,22 @@ export async function startMcpServer(config: AppConfig): Promise<void> {
     tools: buildToolDefinitions()
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
+    const requestDeps: SubagentTaskRunnerDependencies = { ...deps, requestSignal: extra.signal };
 
     try {
       if (name === "subagent_list") return toMcpResult(handleSubagentList(config));
-      if (name === "subagent_run") return toMcpResult(await handleSubagentRun(args ?? {}, deps));
+      if (name === "subagent_run") return toMcpResult(await handleSubagentRun(args ?? {}, requestDeps));
       if (name === "subagent_skills") return toMcpResult(await handleSubagentSkills(args ?? {}, config));
-      if (name === "subagent_start") return toMcpResult(await handleSubagentStart(args ?? {}, deps));
-      if (name === "subagent_start_many") return toMcpResult(await handleSubagentStartMany(args ?? {}, deps));
-      if (name === "subagent_wait") return toMcpResult(await handleSubagentWait(args ?? {}, deps));
-      if (name === "subagent_result") return toMcpResult(await handleSubagentResult(args ?? {}, deps));
-      if (name === "subagent_continue") return toMcpResult(await handleSubagentContinue(args ?? {}, deps));
-      if (name === "subagent_cancel") return toMcpResult(await handleSubagentCancel(args ?? {}, deps));
-      if (name === "subagent_close") return toMcpResult(await handleSubagentClose(args ?? {}, deps));
-      if (name === "subagent_logs") return toMcpResult(await handleSubagentLogs(args ?? {}, deps));
+      if (name === "subagent_start") return toMcpResult(await handleSubagentStart(args ?? {}, requestDeps));
+      if (name === "subagent_start_many") return toMcpResult(await handleSubagentStartMany(args ?? {}, requestDeps));
+      if (name === "subagent_wait") return toMcpResult(await handleSubagentWait(args ?? {}, requestDeps));
+      if (name === "subagent_result") return toMcpResult(await handleSubagentResult(args ?? {}, requestDeps));
+      if (name === "subagent_continue") return toMcpResult(await handleSubagentContinue(args ?? {}, requestDeps));
+      if (name === "subagent_cancel") return toMcpResult(await handleSubagentCancel(args ?? {}, requestDeps));
+      if (name === "subagent_close") return toMcpResult(await handleSubagentClose(args ?? {}, requestDeps));
+      if (name === "subagent_logs") return toMcpResult(await handleSubagentLogs(args ?? {}, requestDeps));
 
       return toMcpError(new Error(`未知工具：${name}`));
     } catch (error) {
@@ -78,8 +80,39 @@ export async function startMcpServer(config: AppConfig): Promise<void> {
     }
   });
 
+  installShutdownHooks(server, deps);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+/**
+ * 安装 MCP transport 和 Node 进程级清理钩子。
+ *
+ * Host 手动停止当前请求时会通过 request signal 取消；Host 关闭 MCP
+ * stdio、重启服务或 Node 收到退出信号时，这里兜底关闭所有活跃子代理，
+ * 避免 detached 子进程组在后台残留。
+ */
+function installShutdownHooks(server: Server, deps: SubagentTaskRunnerDependencies): void {
+  let shuttingDown = false;
+  const shutdown = async (reason: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await shutdownAllActiveTasks(deps, reason).catch(() => undefined);
+  };
+
+  server.onclose = () => {
+    void shutdown("MCP transport 已关闭");
+  };
+
+  process.once("SIGINT", () => {
+    void shutdown("收到 SIGINT，关闭所有子代理").finally(() => process.exit(130));
+  });
+  process.once("SIGTERM", () => {
+    void shutdown("收到 SIGTERM，关闭所有子代理").finally(() => process.exit(143));
+  });
+  process.once("beforeExit", () => {
+    void shutdown("Node 进程即将退出，关闭所有子代理");
+  });
 }
 
 /**

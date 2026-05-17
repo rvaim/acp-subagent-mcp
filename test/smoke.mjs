@@ -78,6 +78,42 @@ const deps = { config, concurrency: new ConcurrencyManager(), registry: new Task
 const run = await handleSubagentRun({ agent_type: 'mock', cwd: tmp, task: { title: '同步', goal: '返回结果' } }, deps);
 assert(run.status === 'completed', 'subagent_run 应成功');
 
+const cancelController = new AbortController();
+const cancelDeps = { config, concurrency: new ConcurrencyManager(), registry: new TaskRegistry(), requestSignal: cancelController.signal };
+const slowRunPromise = handleSubagentRun({
+  agent_type: 'mock',
+  cwd: tmp,
+  timeout_secs: 20,
+  task: { title: '取消测试', goal: '__SLOW__ 模拟长时间运行，随后由 MCP request signal 取消。' }
+}, cancelDeps);
+await waitUntil(() => cancelDeps.registry.list().some((task) => task.status === 'running'));
+cancelController.abort(new Error('manual stop from MCP host'));
+const cancelledRun = await slowRunPromise;
+assert(cancelledRun.status === 'cancelled', 'request signal abort 后 subagent_run 应返回 cancelled');
+assert(cancelDeps.registry.list().every((task) => task.cleanedUp), 'request signal abort 后子代理进程应被清理');
+assert(cancelDeps.concurrency.getActiveTaskCount() === 0, 'request signal abort 后并发锁应释放');
+
+const waitCancelDeps = { config, concurrency: new ConcurrencyManager(), registry: new TaskRegistry() };
+const slowStart = await handleSubagentStart({
+  agent_type: 'mock',
+  cwd: tmp,
+  keep_alive: true,
+  timeout_secs: 20,
+  task: { title: 'wait 取消测试', goal: '__SLOW__ 模拟长时间运行，随后取消 wait。' }
+}, waitCancelDeps);
+const waitCancelController = new AbortController();
+const waitPromise = handleSubagentWait(
+  { task_ids: [slowStart.task_id], return_when: 'all_completed', timeout_secs: 20 },
+  { ...waitCancelDeps, requestSignal: waitCancelController.signal }
+).catch((error) => error);
+await waitUntil(() => waitCancelDeps.registry.get(slowStart.task_id)?.status === 'running');
+waitCancelController.abort(new Error('manual stop wait'));
+const waitCancelled = await waitPromise;
+assert(waitCancelled instanceof Error, 'request signal abort 后 subagent_wait 应停止当前等待');
+await waitCancelDeps.registry.get(slowStart.task_id)?.currentTurnPromise?.catch(() => undefined);
+assert(waitCancelDeps.registry.get(slowStart.task_id)?.status === 'cancelled', '取消 wait 后关联子代理任务应取消');
+assert(waitCancelDeps.registry.get(slowStart.task_id)?.cleanedUp === true, '取消 wait 后关联子代理进程应清理');
+
 const start = await handleSubagentStart({ agent_type: 'mock', cwd: tmp, keep_alive: true, task: { title: '异步', goal: '返回结果' } }, deps);
 assert(start.status === 'started', 'subagent_start 应成功');
 
@@ -111,4 +147,13 @@ console.log('smoke ok');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+async function waitUntil(predicate, timeoutMs = 5000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('等待条件超时');
 }

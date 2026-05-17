@@ -12,6 +12,8 @@ class MockAcpAgent implements acp.Agent {
   private readonly connection: acp.AgentSideConnection;
   /** 当前 session id。 */
   private sessionId = "sess_mock_1";
+  /** 被取消的 session 集合。 */
+  private readonly cancelledSessions = new Set<string>();
 
   /**
    * 创建 mock agent。
@@ -48,6 +50,24 @@ class MockAcpAgent implements acp.Agent {
    * 处理 prompt，并通过 session/update 返回结构化文本。
    */
   async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
+    const text = params.prompt.map((block) => block.type === "text" ? block.text : "").join("\n");
+    if (text.includes("__SLOW__")) {
+      await this.connection.sessionUpdate({
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "slow-start" }
+        }
+      });
+
+      for (let index = 0; index < 120; index += 1) {
+        if (this.cancelledSessions.has(params.sessionId)) {
+          return { stopReason: "cancelled" };
+        }
+        await sleep(100);
+      }
+    }
+
     const result = {
       status: "completed",
       summary: "mock agent 已完成任务。",
@@ -87,9 +107,16 @@ class MockAcpAgent implements acp.Agent {
   /**
    * mock agent 接收取消通知。
    */
-  async cancel(_params: acp.CancelNotification): Promise<void> {
-    return;
+  async cancel(params: acp.CancelNotification): Promise<void> {
+    this.cancelledSessions.add(params.sessionId);
   }
+}
+
+/**
+ * sleep 工具，用于模拟长时间运行的 agent。
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ACP agent stdio 方向：写到 stdout，读自 stdin。
