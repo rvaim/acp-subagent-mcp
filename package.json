@@ -1,6 +1,6 @@
 {
   "name": "@rvaim/acp-subagent-mcp",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": false,
   "type": "module",
   "description": "通用 ACP 子代理 MCP Server：通过 MCP 工具调度、编排和管理支持 ACP 的子代理。",
