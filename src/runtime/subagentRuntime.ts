@@ -52,6 +52,14 @@ export class SubagentRuntime {
   private readonly concurrencyGuard: ConcurrencyGuard;
 
   /**
+   * 正在执行的清理流程。
+   *
+   * 同一个任务可能同时被 MCP cancellation、heartbeat timeout、wall-clock timeout
+   * 和用户手动 subagent_cancel 触发清理，因此这里用 WeakMap 保证杀进程逻辑幂等。
+   */
+  private readonly cleanupPromises = new WeakMap<ActiveSubagentRun, Promise<void>>();
+
+  /**
    * 创建子代理运行时。
    *
    * @param config 服务器配置。
@@ -82,17 +90,20 @@ export class SubagentRuntime {
    * @param input 同步运行输入。
    * @returns 子代理任务运行结果。
    */
-  async run(input: SubagentRunInput): Promise<SubagentRunOutput> {
+  async run(input: SubagentRunInput, signal?: AbortSignal): Promise<SubagentRunOutput> {
     const run = await this.prepareRun(input, {
       keepAlive: false,
       allowPoolRelease: this.shouldAllowPoolRelease(input),
       conflictPolicy: this.config.concurrency.default_conflict_policy,
     });
 
+    const unbindAbort = this.bindRequestAbortToRun(run, signal, "同步子代理任务被 MCP Host 取消");
     try {
       await run.completion;
     } catch {
       // execute 流程已经把错误转换为标准 result，这里继续返回结构化 MCP 输出。
+    } finally {
+      unbindAbort();
     }
     if (!run.result) {
       throw new Error("子代理任务结束但没有生成 result");
@@ -106,12 +117,18 @@ export class SubagentRuntime {
    * @param input 启动输入。
    * @returns 启动结果。
    */
-  async start(input: SubagentStartInput): Promise<SubagentStartOutput> {
+  async start(input: SubagentStartInput, signal?: AbortSignal): Promise<SubagentStartOutput> {
     const run = await this.prepareRun(input, {
       keepAlive: input.keep_alive ?? true,
       allowPoolRelease: false,
       conflictPolicy: this.config.concurrency.default_conflict_policy,
     });
+    const unbindAbort = this.bindRequestAbortToRun(run, signal, "启动子代理任务时 MCP Host 取消了请求");
+    if (signal?.aborted) {
+      unbindAbort();
+      throw new Error("启动子代理任务时 MCP Host 取消了请求");
+    }
+    unbindAbort();
 
     return {
       status: "started",
@@ -129,18 +146,27 @@ export class SubagentRuntime {
    * @param input 批量启动输入。
    * @returns 批量启动结果。
    */
-  async startMany(input: SubagentStartManyInput): Promise<SubagentStartManyOutput> {
+  async startMany(input: SubagentStartManyInput, signal?: AbortSignal): Promise<SubagentStartManyOutput> {
     const started: SubagentStartOutput[] = [];
     const failed: SubagentStartManyOutput["failed"] = [];
     const conflictPolicy = input.conflict_policy ?? this.config.concurrency.default_conflict_policy;
 
     for (const [index, taskInput] of input.tasks.entries()) {
+      if (signal?.aborted) {
+        await this.cancel({ task_ids: started.map((item) => item.task_id), reason: "批量启动子代理任务时 MCP Host 取消了请求" });
+        throw new Error("批量启动子代理任务时 MCP Host 取消了请求");
+      }
+
       try {
         const run = await this.prepareRun(taskInput, {
           keepAlive: taskInput.keep_alive ?? true,
           allowPoolRelease: false,
           conflictPolicy,
         });
+        if (signal?.aborted) {
+          await this.cancel({ task_ids: [run.taskId, ...started.map((item) => item.task_id)], reason: "批量启动子代理任务时 MCP Host 取消了请求" });
+          throw new Error("批量启动子代理任务时 MCP Host 取消了请求");
+        }
         started.push({
           status: "started",
           task_id: run.taskId,
@@ -150,6 +176,11 @@ export class SubagentRuntime {
           created_at: run.createdAt.toISOString(),
         });
       } catch (error) {
+        if (signal?.aborted) {
+          await this.cancel({ task_ids: started.map((item) => item.task_id), reason: "批量启动子代理任务时 MCP Host 取消了请求" });
+          throw error;
+        }
+
         failed.push({
           index,
           agent_type: taskInput.agent_type,
@@ -171,18 +202,31 @@ export class SubagentRuntime {
    * @param input 等待输入。
    * @returns 等待结果。
    */
-  async wait(input: SubagentWaitInput): Promise<SubagentWaitOutput> {
+  async wait(input: SubagentWaitInput, signal?: AbortSignal): Promise<SubagentWaitOutput> {
     const startedAt = Date.now();
     const timeoutMs = (input.timeout_secs ?? 60) * 1000;
 
+    const throwIfWaitAborted = async (): Promise<void> => {
+      if (!signal?.aborted) {
+        return;
+      }
+      await this.cancel({ task_ids: input.task_ids, reason: "等待子代理任务时 MCP Host 取消了请求" });
+      throw new Error("等待子代理任务时 MCP Host 取消了请求");
+    };
+
     while (Date.now() - startedAt < timeoutMs) {
+      await throwIfWaitAborted();
       const snapshot = this.buildWaitOutput(input.task_ids, startedAt);
       if (this.satisfiesWaitPolicy(snapshot, input.return_when)) {
         return snapshot;
       }
 
       const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
-      await this.registry.waitForUpdate(input.task_ids, Math.min(1000, remainingMs));
+      await Promise.race([
+        this.registry.waitForUpdate(input.task_ids, Math.min(1000, remainingMs)),
+        waitForAbort(signal),
+      ]);
+      await throwIfWaitAborted();
     }
 
     if (input.on_timeout === "cancel_pending") {
@@ -219,7 +263,7 @@ export class SubagentRuntime {
    * @param input 继续对话输入。
    * @returns 新一轮运行结果。
    */
-  async continue(input: SubagentContinueInput): Promise<SubagentRunOutput> {
+  async continue(input: SubagentContinueInput, signal?: AbortSignal): Promise<SubagentRunOutput> {
     const run = this.requireRun(input.task_id);
     if (!run.client || !run.sessionId) {
       throw new Error("该任务没有可继续使用的 ACP session；请使用 subagent_start 并 keep_alive=true 启动");
@@ -244,6 +288,7 @@ export class SubagentRuntime {
       heartbeatTimeoutSecs: this.config.defaults.heartbeat_timeout_secs,
     });
 
+    const unbindAbort = this.bindRequestAbortToRun(run, signal, "继续子代理任务时 MCP Host 取消了请求");
     try {
       const output = await run.completion;
       return this.compact(output, input.detail_level);
@@ -252,6 +297,8 @@ export class SubagentRuntime {
         return this.compact(run.result, input.detail_level);
       }
       throw new Error("继续任务失败且没有生成标准结果");
+    } finally {
+      unbindAbort();
     }
   }
 
@@ -340,6 +387,17 @@ export class SubagentRuntime {
    * 关闭运行时持有的池化 session。
    */
   async shutdown(): Promise<void> {
+    const runs = this.registry.list();
+    await Promise.allSettled(
+      runs.map(async (run) => {
+        if (!isTerminalStatus(run.status)) {
+          run.errors.push({ code: "MCP_SERVER_SHUTDOWN", message: "MCP Server 正在关闭，子代理任务已取消" });
+          this.registry.setStatus(run, "cancelled");
+        }
+        run.cancelController.abort("MCP Server 正在关闭");
+        await this.cancelAndShutdown(run);
+      }),
+    );
     await this.sessionPool.shutdownAll();
   }
 
@@ -570,6 +628,20 @@ export class SubagentRuntime {
       rejectTimeout(new Error(message));
     };
 
+    const cancelFromAbortSignal = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      const message = abortReasonToMessage(run.cancelController.signal.reason, "子代理任务被取消，已终止");
+      if (!run.errors.some((error) => error.code === "MCP_REQUEST_CANCELLED" || error.code === "CANCELLED")) {
+        run.errors.push({ code: "MCP_REQUEST_CANCELLED", message });
+      }
+      this.registry.setStatus(run, "cancelled");
+      void this.cancelAndShutdown(run);
+      rejectTimeout(new Error(message));
+    };
+
     const timeoutPromise = new Promise<never>((_, reject) => {
       rejectTimeout = reject;
     });
@@ -594,6 +666,11 @@ export class SubagentRuntime {
       },
     );
 
+    run.cancelController.signal.addEventListener("abort", cancelFromAbortSignal, { once: true });
+    if (run.cancelController.signal.aborted) {
+      queueMicrotask(cancelFromAbortSignal);
+    }
+
     try {
       const result = await Promise.race([operation(), timeoutPromise]);
       settled = true;
@@ -611,6 +688,7 @@ export class SubagentRuntime {
       throw error;
     } finally {
       settled = true;
+      run.cancelController.signal.removeEventListener("abort", cancelFromAbortSignal);
       clearTimeout(wallTimer);
       clearInterval(heartbeatTimer);
       clearInterval(inactivityTimer);
@@ -668,17 +746,62 @@ export class SubagentRuntime {
    * @param run 任务对象。
    */
   private async cancelAndShutdown(run: ActiveSubagentRun): Promise<void> {
-    if (!run.client) {
+    const existingCleanup = this.cleanupPromises.get(run);
+    if (existingCleanup) {
+      await existingCleanup;
       return;
     }
-    if (run.sessionId) {
-      try {
-        await run.client.cancel(run.sessionId);
-      } catch {
-        // 取消通知失败时继续清理进程。
+
+    const cleanupPromise = (async (): Promise<void> => {
+      if (!run.client) {
+        return;
       }
+      if (run.sessionId) {
+        try {
+          await run.client.cancel(run.sessionId);
+        } catch {
+          // 取消通知失败时继续清理进程。真正可靠的兜底是下面的进程树终止。
+        }
+      }
+      await run.client.shutdown();
+    })();
+
+    this.cleanupPromises.set(run, cleanupPromise);
+    await cleanupPromise;
+  }
+
+  /**
+   * 把 MCP 请求取消信号绑定到指定子代理任务。
+   *
+   * MCP Host 点击停止时，TypeScript SDK 会通过 extra.signal 通知当前 tool handler。
+   * 这里必须把这个信号转换成运行时取消，否则 Host 只会停止等待响应，Claude 等子进程仍会继续运行。
+   *
+   * @param run 任务对象。
+   * @param signal MCP SDK 提供的请求取消信号。
+   * @param defaultReason 默认取消原因。
+   * @returns 解绑函数。
+   */
+  private bindRequestAbortToRun(run: ActiveSubagentRun, signal: AbortSignal | undefined, defaultReason: string): () => void {
+    if (!signal) {
+      return () => undefined;
     }
-    await run.client.shutdown();
+
+    const onAbort = (): void => {
+      if (isTerminalStatus(run.status)) {
+        return;
+      }
+      const message = abortReasonToMessage(signal.reason, defaultReason);
+      run.errors.push({ code: "MCP_REQUEST_CANCELLED", message });
+      this.registry.setStatus(run, "cancelled");
+      run.cancelController.abort(message);
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+    }
+
+    return () => signal.removeEventListener("abort", onAbort);
   }
 
   /**
@@ -887,6 +1010,41 @@ export class SubagentRuntime {
     }
     return status;
   }
+}
+
+/**
+ * 等待 AbortSignal 触发。
+ *
+ * @param signal 可选取消信号。
+ * @returns signal 触发后 resolve 的 Promise；未传 signal 时永不 resolve。
+ */
+function waitForAbort(signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    return new Promise(() => undefined);
+  }
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
+/**
+ * 将 AbortSignal.reason 转换成人类可读消息。
+ *
+ * @param reason AbortSignal 的取消原因。
+ * @param fallback 默认消息。
+ * @returns 可记录到错误结果中的消息。
+ */
+function abortReasonToMessage(reason: unknown, fallback: string): string {
+  if (reason instanceof Error) {
+    return reason.message;
+  }
+  if (typeof reason === "string" && reason.trim()) {
+    return reason;
+  }
+  return fallback;
 }
 
 /**

@@ -1,10 +1,10 @@
 {
   "mcpServers": {
     "@rvaim/acp-subagent-mcp": {
-      "command": "node",
-      "args": ["/path/to/acp-subagent-mcp/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@rvaim/acp-subagent-mcp"],
       "env": {
-        "SUBAGENT_MCP_CONFIG": "/path/to/acp-subagent-mcp/examples/agents.toml"
+        "SUBAGENT_MCP_CONFIG": "/absolute/path/to/agents.toml"
       }
     }
   }

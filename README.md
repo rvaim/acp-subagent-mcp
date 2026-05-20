@@ -29,7 +29,7 @@
 - 子代理 JSON 或自然语言结果解析
 - wall-clock timeout
 - inactivity timeout
-- 默认 3 秒 heartbeat timeout
+- 默认 60 秒 heartbeat timeout
 - 取消与进程树清理
 - 日志目录：`task.json`、`rendered_prompt.md`、`events.jsonl`、`stderr.log`、`result.json`
 - cwd 与文件路径安全校验
@@ -79,7 +79,7 @@ JS
 
 ## 作为 MCP Server 启动
 
-先复制并修改配置：
+源码目录下可以先复制并修改配置：
 
 ```bash
 cp examples/agents.toml agents.toml
@@ -97,6 +97,87 @@ SUBAGENT_MCP_CONFIG=./agents.toml node dist/index.js
       "args": ["/path/to/acp-subagent-mcp/dist/index.js"],
       "env": {
         "SUBAGENT_MCP_CONFIG": "/path/to/acp-subagent-mcp/agents.toml"
+      }
+    }
+  }
+}
+```
+
+如果通过 npm 包安装或 `npx` 使用，推荐让 MCP Host 直接启动包内的 bin，并显式传入配置文件：
+
+```json
+{
+  "mcpServers": {
+    "@rvaim/acp-subagent-mcp": {
+      "command": "npx",
+      "args": ["-y", "@rvaim/acp-subagent-mcp"],
+      "env": {
+        "SUBAGENT_MCP_CONFIG": "/absolute/path/to/agents.toml"
+      }
+    }
+  }
+}
+```
+
+未显式设置 `SUBAGENT_MCP_CONFIG` 且当前目录没有 `agents.toml` 时，Server 会使用内置默认 agent 配置启动：
+
+```toml
+[agents.claude]
+description = "默认 ACP coding agent。可通过 SUBAGENT_MCP_DEFAULT_AGENT_* 环境变量覆盖。"
+command = "npx"
+args = ["-y", "@agentclientprotocol/claude-agent-acp"]
+capabilities = ["code", "review", "edit", "analysis"]
+```
+
+因此不写 `agents.toml` 也能在 `subagent_list` 里看到 `claude`。首次运行会通过 `npx` 启动 Claude ACP adapter；你仍需要按 adapter/Claude Agent SDK 的要求完成认证。
+
+内置 agent 名字会自动补齐 ACP 启动命令：
+
+| agent 名字 | 默认命令 |
+| --- | --- |
+| `claude` | `npx -y @agentclientprotocol/claude-agent-acp` |
+| `codex` | `npx -y @zed-industries/codex-acp` |
+| `gemini` | `gemini --acp` |
+
+所以也可以只写 agent 名字：
+
+```toml
+[agents.gemini]
+description = "Gemini CLI"
+
+[agents.codex]
+description = "Codex"
+```
+
+## 环境变量配置
+
+不想写 `agents.toml` 时，可以用环境变量覆盖默认配置：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SUBAGENT_MCP_DEFAULT_AGENT_TYPE` | `claude` | 默认 agent type |
+| `SUBAGENT_MCP_DEFAULT_AGENT_COMMAND` | `npx` | 默认 agent 命令 |
+| `SUBAGENT_MCP_DEFAULT_AGENT_ARGS` | `["-y","@agentclientprotocol/claude-agent-acp"]` | JSON 字符串数组或逗号分隔参数 |
+| `SUBAGENT_MCP_DEFAULT_AGENT_CAPABILITIES` | `["code","review","edit","analysis"]` | JSON 字符串数组或逗号分隔能力 |
+| `SUBAGENT_MCP_DEFAULT_AGENT_DESCRIPTION` | 内置描述 | `subagent_list` 展示描述 |
+| `SUBAGENT_MCP_DEFAULT_AGENT_ENV` | `{}` | 传给默认 agent 的 JSON 字符串对象 |
+| `SUBAGENT_MCP_TIMEOUT_SECS` | `600` | 默认任务超时 |
+| `SUBAGENT_MCP_INACTIVITY_TIMEOUT_SECS` | `120` | 默认无进展超时 |
+| `SUBAGENT_MCP_HEARTBEAT_TIMEOUT_SECS` | `60` | 默认心跳超时 |
+| `SUBAGENT_MCP_ALLOWED_CWD_ROOTS` | 当前工作目录 | JSON 字符串数组或逗号分隔路径 |
+| `SUBAGENT_MCP_ALLOW_NETWORK` | `false` | 是否允许联网，支持 `true` / `false` |
+| `SUBAGENT_MCP_MAX_PARALLEL_TASKS` | `4` | 最大并行任务数 |
+
+例如改用 Gemini；因为 `gemini` 是内置 agent 名字，只需要改 type：
+
+```json
+{
+  "mcpServers": {
+    "@rvaim/acp-subagent-mcp": {
+      "command": "npx",
+      "args": ["-y", "@rvaim/acp-subagent-mcp"],
+      "env": {
+        "SUBAGENT_MCP_DEFAULT_AGENT_TYPE": "gemini"
       }
     }
   }

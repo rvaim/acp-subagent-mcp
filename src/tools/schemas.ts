@@ -54,7 +54,7 @@ export const subagentRunSchema = z.object({
   cwd: z.string().optional().describe("子代理运行时工作目录，必须是绝对路径；未传时使用当前工作目录"),
   timeout_secs: z.number().positive().optional().describe("整个任务最大运行时间，单位秒"),
   inactivity_timeout_secs: z.number().positive().optional().describe("无有效输出时最大等待时间，单位秒"),
-  heartbeat_timeout_secs: z.number().positive().optional().describe("无任何存活响应时最大等待时间，默认 3 秒"),
+  heartbeat_timeout_secs: z.number().positive().optional().describe("无任何存活响应时最大等待时间，默认 60 秒"),
   mode: z.enum(["analyze", "review", "edit", "implement", "debug", "custom"]).optional().describe("任务模式"),
   mcp_servers: z.union([z.record(z.unknown()), z.array(z.unknown())]).optional().describe("传递给 ACP session 的 MCP servers 配置"),
   session_pool_policy: z.enum(["auto", "disable", "force_new"]).optional().describe("会话池复用策略"),

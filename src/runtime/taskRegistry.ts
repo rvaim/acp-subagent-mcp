@@ -180,6 +180,15 @@ export class TaskRegistry extends EventEmitter {
   }
 
   /**
+   * 列出当前注册表中的全部任务。
+   *
+   * @returns 任务对象快照列表。
+   */
+  list(): ActiveSubagentRun[] {
+    return Array.from(this.runs.values());
+  }
+
+  /**
    * 获取多个任务对象。
    *
    * @param taskIds 任务 ID 列表。

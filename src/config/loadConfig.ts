@@ -24,7 +24,7 @@ const DEFAULT_PERMISSION_POLICY: PermissionPolicy = {
 const DEFAULT_DEFAULTS: DefaultsConfig = {
   timeout_secs: 600,
   inactivity_timeout_secs: 120,
-  heartbeat_timeout_secs: 3,
+  heartbeat_timeout_secs: 60,
   max_depth: 2,
   max_prompt_chars: 120000,
   max_inline_file_chars: 30000,
@@ -57,6 +57,27 @@ const DEFAULT_SESSION_POOL: SessionPoolConfig = {
   reuse_policy: "auto",
 };
 
+const AGENT_PRESETS: Record<string, Pick<AgentConfig, "description" | "command" | "args" | "capabilities">> = {
+  claude: {
+    description: "Claude Agent SDK ACP adapter。",
+    command: "npx",
+    args: ["-y", "@agentclientprotocol/claude-agent-acp"],
+    capabilities: ["code", "review", "edit", "analysis"],
+  },
+  codex: {
+    description: "Codex ACP adapter。",
+    command: "npx",
+    args: ["-y", "@zed-industries/codex-acp"],
+    capabilities: ["code", "review", "edit", "analysis"],
+  },
+  gemini: {
+    description: "Gemini CLI ACP mode。",
+    command: "gemini",
+    args: ["--acp"],
+    capabilities: ["code", "review", "edit", "analysis"],
+  },
+};
+
 /**
  * 解析配置文件路径。
  *
@@ -74,11 +95,20 @@ export function resolveConfigPath(): string {
  *
  * @param configPath 可选配置文件路径；未传时会调用 resolveConfigPath。
  * @returns 归一化后的服务器配置。
- * @throws 当配置无法读取、格式错误或没有任何 agent 时抛出错误。
+ * @throws 当显式配置无法读取、格式错误或配置文件没有任何 agent 时抛出错误。
  */
-export async function loadConfig(configPath = resolveConfigPath()): Promise<ServerConfig> {
-  const absoluteConfigPath = path.resolve(configPath);
-  const rawToml = await fs.readFile(absoluteConfigPath, "utf8");
+export async function loadConfig(configPath?: string): Promise<ServerConfig> {
+  const hasExplicitConfigPath = configPath !== undefined || process.env.SUBAGENT_MCP_CONFIG !== undefined;
+  const absoluteConfigPath = path.resolve(configPath ?? resolveConfigPath());
+  let rawToml: string;
+  try {
+    rawToml = await fs.readFile(absoluteConfigPath, "utf8");
+  } catch (error) {
+    if (!hasExplicitConfigPath && isNodeErrorCode(error, "ENOENT")) {
+      return createEmptyConfig(absoluteConfigPath);
+    }
+    throw error;
+  }
   const parsed = parse(rawToml) as Record<string, unknown>;
 
   const defaults = normalizeDefaults(parsed.defaults);
@@ -92,7 +122,7 @@ export async function loadConfig(configPath = resolveConfigPath()): Promise<Serv
     throw new Error("agents.toml 中必须至少配置一个 [agents.<name>] 子代理");
   }
 
-  return {
+  return applyEnvironmentOverrides({
     defaults,
     security,
     concurrency,
@@ -100,7 +130,205 @@ export async function loadConfig(configPath = resolveConfigPath()): Promise<Serv
     permissions,
     agents,
     configPath: absoluteConfigPath,
+  });
+}
+
+/**
+ * 在无显式配置且当前目录没有 agents.toml 时使用的空配置。
+ *
+ * 这允许 npm 包安装后的 MCP Host 探测流程完成 initialize/listTools。
+ */
+function createEmptyConfig(configPath: string): ServerConfig {
+  return applyEnvironmentOverrides({
+    defaults: normalizeDefaults(undefined),
+    security: normalizeSecurity(undefined),
+    concurrency: normalizeConcurrency(undefined),
+    session_pool: normalizeSessionPool(undefined),
+    permissions: normalizePermissions(undefined),
+    agents: createDefaultAgents(),
+    configPath,
+  });
+}
+
+/**
+ * 创建无配置文件时的内置 agent。
+ */
+function createDefaultAgents(): Record<string, AgentConfig> {
+  const agentType = envString("SUBAGENT_MCP_DEFAULT_AGENT_TYPE", "claude");
+  const preset = agentPreset(agentType);
+  const agent: AgentConfig = {
+    description: envString(
+      "SUBAGENT_MCP_DEFAULT_AGENT_DESCRIPTION",
+      "默认 ACP coding agent。可通过 SUBAGENT_MCP_DEFAULT_AGENT_* 环境变量覆盖。",
+    ),
+    command: envString("SUBAGENT_MCP_DEFAULT_AGENT_COMMAND", preset.command),
+    args: envStringArray("SUBAGENT_MCP_DEFAULT_AGENT_ARGS", preset.args),
+    capabilities: envStringArray("SUBAGENT_MCP_DEFAULT_AGENT_CAPABILITIES", preset.capabilities),
+    env: envStringRecord("SUBAGENT_MCP_DEFAULT_AGENT_ENV", {}),
   };
+  const systemPrompt = envOptionalString("SUBAGENT_MCP_DEFAULT_AGENT_SYSTEM_PROMPT");
+  const heartbeatTimeout = envOptionalNumber("SUBAGENT_MCP_DEFAULT_AGENT_HEARTBEAT_TIMEOUT_SECS");
+  const timeout = envOptionalNumber("SUBAGENT_MCP_DEFAULT_AGENT_TIMEOUT_SECS");
+  const inactivityTimeout = envOptionalNumber("SUBAGENT_MCP_DEFAULT_AGENT_INACTIVITY_TIMEOUT_SECS");
+  if (systemPrompt !== undefined) agent.system_prompt = systemPrompt;
+  if (heartbeatTimeout !== undefined) agent.heartbeat_timeout_secs = heartbeatTimeout;
+  if (timeout !== undefined) agent.timeout_secs = timeout;
+  if (inactivityTimeout !== undefined) agent.inactivity_timeout_secs = inactivityTimeout;
+  return { [agentType]: agent };
+}
+
+function agentPreset(agentType: string): Pick<AgentConfig, "description" | "command" | "args" | "capabilities"> {
+  return AGENT_PRESETS[agentType] ?? {
+    description: "自定义 ACP agent。",
+    command: agentType,
+    args: [],
+    capabilities: ["code", "review", "edit", "analysis"],
+  };
+}
+
+/**
+ * 使用环境变量覆盖配置。环境变量只覆盖显式设置的项。
+ */
+function applyEnvironmentOverrides(config: ServerConfig): ServerConfig {
+  const defaultAgentType = envOptionalString("SUBAGENT_MCP_DEFAULT_AGENT_TYPE");
+  return {
+    ...config,
+    defaults: {
+      ...config.defaults,
+      timeout_secs: envNumber("SUBAGENT_MCP_TIMEOUT_SECS", config.defaults.timeout_secs),
+      inactivity_timeout_secs: envNumber("SUBAGENT_MCP_INACTIVITY_TIMEOUT_SECS", config.defaults.inactivity_timeout_secs),
+      heartbeat_timeout_secs: envNumber("SUBAGENT_MCP_HEARTBEAT_TIMEOUT_SECS", config.defaults.heartbeat_timeout_secs),
+      max_depth: envNumber("SUBAGENT_MCP_MAX_DEPTH", config.defaults.max_depth),
+      max_prompt_chars: envNumber("SUBAGENT_MCP_MAX_PROMPT_CHARS", config.defaults.max_prompt_chars),
+      max_inline_file_chars: envNumber("SUBAGENT_MCP_MAX_INLINE_FILE_CHARS", config.defaults.max_inline_file_chars),
+      max_tool_output_chars: envNumber("SUBAGENT_MCP_MAX_TOOL_OUTPUT_CHARS", config.defaults.max_tool_output_chars),
+      default_detail_level: envStringUnion(
+        "SUBAGENT_MCP_DEFAULT_DETAIL_LEVEL",
+        ["summary", "normal", "verbose"],
+        config.defaults.default_detail_level,
+      ),
+      log_dir: envString("SUBAGENT_MCP_LOG_DIR", config.defaults.log_dir),
+      session_ttl_secs: envNumber("SUBAGENT_MCP_SESSION_TTL_SECS", config.defaults.session_ttl_secs),
+      completed_session_ttl_secs: envNumber(
+        "SUBAGENT_MCP_COMPLETED_SESSION_TTL_SECS",
+        config.defaults.completed_session_ttl_secs,
+      ),
+      max_active_sessions: envNumber("SUBAGENT_MCP_MAX_ACTIVE_SESSIONS", config.defaults.max_active_sessions),
+    },
+    security: {
+      ...config.security,
+      allowed_cwd_roots: envStringArray("SUBAGENT_MCP_ALLOWED_CWD_ROOTS", config.security.allowed_cwd_roots).map((root) =>
+        path.resolve(root),
+      ),
+      allow_network: envBoolean("SUBAGENT_MCP_ALLOW_NETWORK", config.security.allow_network),
+    },
+    concurrency: {
+      ...config.concurrency,
+      max_parallel_tasks: envNumber("SUBAGENT_MCP_MAX_PARALLEL_TASKS", config.concurrency.max_parallel_tasks),
+      default_conflict_policy: envStringUnion(
+        "SUBAGENT_MCP_DEFAULT_CONFLICT_POLICY",
+        ["allow_readonly_parallel", "single_writer_per_cwd", "sandbox_worktree"],
+        config.concurrency.default_conflict_policy,
+      ),
+    },
+    session_pool: {
+      ...config.session_pool,
+      enabled: envBoolean("SUBAGENT_MCP_SESSION_POOL_ENABLED", config.session_pool.enabled),
+      max_pooled_sessions_per_parent: envNumber(
+        "SUBAGENT_MCP_MAX_POOLED_SESSIONS_PER_PARENT",
+        config.session_pool.max_pooled_sessions_per_parent,
+      ),
+      max_context_usage_ratio: envNumber("SUBAGENT_MCP_MAX_CONTEXT_USAGE_RATIO", config.session_pool.max_context_usage_ratio),
+      idle_ttl_secs: envNumber("SUBAGENT_MCP_SESSION_POOL_IDLE_TTL_SECS", config.session_pool.idle_ttl_secs),
+      reuse_policy: envStringUnion("SUBAGENT_MCP_SESSION_POOL_REUSE_POLICY", ["auto", "disable", "force_new"], config.session_pool.reuse_policy),
+    },
+    agents: defaultAgentType && Object.keys(config.agents).length === 0 ? createDefaultAgents() : config.agents,
+  };
+}
+
+/**
+ * 判断 Node.js 系统错误码。
+ */
+function isNodeErrorCode(error: unknown, code: string): boolean {
+  return Boolean(error) && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === code;
+}
+
+function envOptionalString(name: string): string | undefined {
+  const value = process.env[name];
+  return value && value.length > 0 ? value : undefined;
+}
+
+function envString(name: string, fallback: string): string {
+  return envOptionalString(name) ?? fallback;
+}
+
+function envOptionalNumber(name: string): number | undefined {
+  const value = process.env[name];
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function envNumber(name: string, fallback: number): number {
+  return envOptionalNumber(name) ?? fallback;
+}
+
+function envBoolean(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.toLowerCase();
+  if (value === "true" || value === "1" || value === "yes") {
+    return true;
+  }
+  if (value === "false" || value === "0" || value === "no") {
+    return false;
+  }
+  return fallback;
+}
+
+function envStringArray(name: string, fallback: string[]): string[] {
+  const value = process.env[name];
+  if (!value) {
+    return fallback;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) {
+      return parsed;
+    }
+  } catch {
+    // 支持简单逗号分隔，便于在 MCP Host env 里手写。
+  }
+  const parts = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts : fallback;
+}
+
+function envStringRecord(name: string, fallback: Record<string, string>): Record<string, string> {
+  const value = process.env[name];
+  if (!value) {
+    return fallback;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    const input = asRecord(parsed);
+    const output: Record<string, string> = {};
+    for (const [key, rawValue] of Object.entries(input)) {
+      if (typeof rawValue === "string") {
+        output[key] = rawValue;
+      }
+    }
+    return output;
+  } catch {
+    return fallback;
+  }
+}
+
+function envStringUnion<T extends string>(name: string, choices: readonly T[], fallback: T): T {
+  const value = process.env[name];
+  return typeof value === "string" && choices.includes(value as T) ? (value as T) : fallback;
 }
 
 /**
@@ -237,10 +465,8 @@ function normalizeAgents(value: unknown): Record<string, AgentConfig> {
 
   for (const [agentType, agentValue] of Object.entries(input)) {
     const agentInput = asRecord(agentValue);
-    const command = stringOr(agentInput.command, "");
-    if (!command) {
-      throw new Error(`agents.${agentType}.command 不能为空`);
-    }
+    const preset = agentPreset(agentType);
+    const command = stringOr(agentInput.command, preset.command);
 
     const envValue = asRecord(agentInput.env);
     const env: Record<string, string> = {};
@@ -251,10 +477,10 @@ function normalizeAgents(value: unknown): Record<string, AgentConfig> {
     }
 
     agents[agentType] = {
-      description: stringOr(agentInput.description, "未提供描述"),
+      description: stringOr(agentInput.description, preset.description),
       command,
-      args: arrayOfStringOr(agentInput.args, []),
-      capabilities: arrayOfStringOr(agentInput.capabilities, []),
+      args: arrayOfStringOr(agentInput.args, preset.args),
+      capabilities: arrayOfStringOr(agentInput.capabilities, preset.capabilities),
       system_prompt: typeof agentInput.system_prompt === "string" ? agentInput.system_prompt : undefined,
       env,
       heartbeat_timeout_secs: typeof agentInput.heartbeat_timeout_secs === "number" ? agentInput.heartbeat_timeout_secs : undefined,

@@ -273,7 +273,7 @@ export interface SubagentRunInput {
   /** 任务无有效输出时的最大等待时间，单位为秒。 */
   inactivity_timeout_secs?: number;
 
-  /** 子代理无任何存活响应时的最大等待时间，单位为秒，默认 3。 */
+  /** 子代理无任何存活响应时的最大等待时间，单位为秒，默认 60。 */
   heartbeat_timeout_secs?: number;
 
   /** 任务模式，用于影响 prompt 渲染和权限策略。 */

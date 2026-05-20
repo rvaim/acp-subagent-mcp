@@ -1,7 +1,7 @@
 [defaults]
 timeout_secs = 60
 inactivity_timeout_secs = 30
-heartbeat_timeout_secs = 3
+heartbeat_timeout_secs = 60
 max_depth = 2
 max_prompt_chars = 120000
 max_inline_file_chars = 30000

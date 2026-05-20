@@ -1,26 +1,18 @@
 {
   "name": "@rvaim/acp-subagent-mcp",
-  "version": "0.1.5",
+  "version": "0.1.9",
   "description": "通用 ACP 子代理 MCP Server",
   "type": "module",
   "bin": {
     "acp-subagent-mcp": "dist/index.js"
-  },
-  "files": [
-    "dist/",
-    "examples/",
-    "doc/",
-    "README.md"
-  ],
-  "publishConfig": {
-    "access": "public"
   },
   "scripts": {
     "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "check": "node ./node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
-    "test:fake-agent": "SUBAGENT_MCP_CONFIG=examples/agents.toml node dist/index.js"
+    "test:fake-agent": "SUBAGENT_MCP_CONFIG=examples/agents.toml node dist/index.js",
+    "test:cancel-heartbeat": "npm run build && node tests/cancellation-and-heartbeat.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -35,5 +27,14 @@
   "engines": {
     "node": ">=20.0.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/",
+    "doc/",
+    "examples/",
+    "README.md"
+  ]
 }

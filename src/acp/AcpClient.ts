@@ -86,6 +86,14 @@ export class GenericAcpClient {
   private initializeResult: Record<string, unknown> | undefined;
 
   /**
+   * 正在执行的关闭流程。
+   *
+   * shutdown 可能被取消、超时、心跳和 MCP Server 退出同时调用，
+   * 使用该 Promise 保证底层进程树只执行一套终止流程。
+   */
+  private shutdownPromise: Promise<void> | undefined;
+
+  /**
    * 创建通用 ACP client。
    *
    * @param input ACP client 创建参数。
@@ -134,7 +142,7 @@ export class GenericAcpClient {
       clientInfo: {
         name: "@rvaim/acp-subagent-mcp",
         title: "通用 ACP 子代理 MCP Server",
-        version: "0.1.5",
+        version: "0.1.9",
       },
     });
     this.initializeResult = isRecord(result) ? result : {};
@@ -167,12 +175,16 @@ export class GenericAcpClient {
    */
   async prompt(options: PromptInput): Promise<AcpPromptResult> {
     this.currentAggregator = options.aggregator;
-    const result = await this.transport.sendRequest("session/prompt", {
-      sessionId: options.sessionId,
-      prompt: [{ type: "text", text: options.prompt }],
-    });
-    this.currentAggregator = undefined;
-    return isRecord(result) ? (result as AcpPromptResult) : {};
+    try {
+      const result = await this.transport.sendRequest("session/prompt", {
+        sessionId: options.sessionId,
+        prompt: [{ type: "text", text: options.prompt }],
+      });
+      return isRecord(result) ? (result as AcpPromptResult) : {};
+    } finally {
+      // prompt 因取消或进程退出而失败时，也必须释放聚合器，避免后续池化复用串事件。
+      this.currentAggregator = undefined;
+    }
   }
 
   /**
@@ -202,8 +214,21 @@ export class GenericAcpClient {
    * 关闭 ACP client，并清理底层子进程。
    */
   async shutdown(): Promise<void> {
-    this.transport.close();
-    await terminateThenKill(this.child);
+    if (this.shutdownPromise) {
+      await this.shutdownPromise;
+      return;
+    }
+
+    this.shutdownPromise = (async (): Promise<void> => {
+      try {
+        this.transport.close();
+      } catch {
+        // transport 可能已经因为子进程退出而关闭，继续执行进程树兜底终止。
+      }
+      await terminateThenKill(this.child);
+    })();
+
+    await this.shutdownPromise;
   }
 
   /**

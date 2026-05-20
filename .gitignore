@@ -3,3 +3,4 @@ dist/
 .subagent-runs/
 .env
 *.log
+.tmp-cancel-heartbeat-test/

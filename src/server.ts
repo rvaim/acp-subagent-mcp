@@ -35,7 +35,7 @@ export interface CreatedServer {
 export function createServer(config: ServerConfig): CreatedServer {
   const runtime = new SubagentRuntime(config);
   const server = new McpServer(
-    { name: "@rvaim/acp-subagent-mcp", version: "0.1.5" },
+    { name: "@rvaim/acp-subagent-mcp", version: "0.1.9" },
     {
       instructions:
         "这是一个通用 ACP 子代理编排 MCP Server。优先使用 subagent_list 查看可用子代理；短任务使用 subagent_run；需要并行、多轮或取消时使用 subagent_start/subagent_wait/subagent_continue/subagent_cancel/subagent_close。",
@@ -59,7 +59,7 @@ export function createServer(config: ServerConfig): CreatedServer {
       description: "拉起或复用一个 ACP 子代理 session，发送结构化任务，等待结果并返回压缩后的结构化输出。",
       inputSchema: subagentRunSchema,
     },
-    async (input) => toToolResult(await runtime.run(input)),
+    async (input, extra) => toToolResult(await runtime.run(input, extra.signal)),
   );
 
   server.registerTool(
@@ -69,7 +69,7 @@ export function createServer(config: ServerConfig): CreatedServer {
       description: "启动一个子代理任务并立即返回 task_id，适合异步等待、取消或后续 continue。",
       inputSchema: subagentStartSchema,
     },
-    async (input) => toToolResult(await runtime.start(input)),
+    async (input, extra) => toToolResult(await runtime.start(input, extra.signal)),
   );
 
   server.registerTool(
@@ -79,7 +79,7 @@ export function createServer(config: ServerConfig): CreatedServer {
       description: "并行启动多个子代理任务，返回每个任务的 task_id。",
       inputSchema: subagentStartManySchema,
     },
-    async (input) => toToolResult(await runtime.startMany(input)),
+    async (input, extra) => toToolResult(await runtime.startMany(input, extra.signal)),
   );
 
   server.registerTool(
@@ -89,7 +89,7 @@ export function createServer(config: ServerConfig): CreatedServer {
       description: "等待一个或多个子代理任务，支持 all_completed、first_completed、first_success、first_failure、any_update、timeout_partial。",
       inputSchema: subagentWaitSchema,
     },
-    async (input) => toToolResult(await runtime.wait(input)),
+    async (input, extra) => toToolResult(await runtime.wait(input, extra.signal)),
   );
 
   server.registerTool(
@@ -109,7 +109,7 @@ export function createServer(config: ServerConfig): CreatedServer {
       description: "对 subagent_start 创建且 keep_alive=true 的同一个 ACP session 继续发送消息。",
       inputSchema: subagentContinueSchema,
     },
-    async (input) => toToolResult(await runtime.continue(input)),
+    async (input, extra) => toToolResult(await runtime.continue(input, extra.signal)),
   );
 
   server.registerTool(
@@ -154,16 +154,30 @@ export async function startStdioServer(config: ServerConfig): Promise<void> {
   const { server, runtime } = createServer(config);
   const transport = new StdioServerTransport();
 
+  let shuttingDown = false;
+
   const shutdown = async (): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
     await runtime.shutdown();
   };
 
-  process.once("SIGINT", () => {
+  const shutdownAndExit = (): void => {
     void shutdown().finally(() => process.exit(0));
-  });
-  process.once("SIGTERM", () => {
-    void shutdown().finally(() => process.exit(0));
-  });
+  };
+
+  process.once("SIGINT", shutdownAndExit);
+  process.once("SIGTERM", shutdownAndExit);
+
+  // MCP Host 关闭 stdio 连接时，必须清理所有仍在运行或池化的子代理进程。
+  process.stdin.once("end", shutdownAndExit);
+  process.stdin.once("close", shutdownAndExit);
+
+  transport.onclose = () => {
+    void shutdown();
+  };
 
   await server.connect(transport);
 }

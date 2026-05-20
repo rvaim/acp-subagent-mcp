@@ -50,7 +50,7 @@ rl.on("line", (line) => {
           promptCapabilities: { embeddedContext: true },
           sessionCapabilities: { close: {} },
         },
-        agentInfo: { name: "fake-acp-agent", title: "示例 ACP Agent", version: "0.1.5" },
+        agentInfo: { name: "fake-acp-agent", title: "示例 ACP Agent", version: "0.1.0" },
         authMethods: [],
       },
     });
