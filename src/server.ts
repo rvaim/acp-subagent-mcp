@@ -1,225 +1,193 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema, type ServerNotification, type Tool } from "@modelcontextprotocol/sdk/types.js";
-import type { AppConfig } from "./config/types.js";
-import { ConcurrencyManager } from "./runtime/concurrency.js";
-import { TaskRegistry } from "./runtime/taskRegistry.js";
-import { shutdownAllActiveTasks, type SubagentTaskRunnerDependencies } from "./runtime/taskRunner.js";
-import { handleSubagentList } from "./tools/subagentList.js";
-import { handleSubagentRun } from "./tools/subagentRun.js";
-import { handleSubagentRunMany } from "./tools/subagentRunMany.js";
-import { handleSubagentRevise } from "./tools/subagentRevise.js";
-import { handleSubagentReviseMany } from "./tools/subagentReviseMany.js";
-import { handleSubagentSkills, subagentSkillsInputJsonSchema, subagentSkillsOutputJsonSchema } from "./tools/subagentSkills.js";
-import { getPackageVersion } from "./version.js";
-import { toMcpError, toMcpResult } from "./tools/mcpResult.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { ServerConfig } from "./config/types.js";
+import { SubagentRuntime } from "./runtime/subagentRuntime.js";
 import {
-  genericToolOutputJsonSchema,
-  subagentListInputJsonSchema,
-  subagentListOutputJsonSchema,
-  subagentReviseInputJsonSchema,
-  subagentReviseManyInputJsonSchema,
-  subagentRunInputJsonSchema,
-  subagentRunManyInputJsonSchema,
-  subagentRunManyOutputJsonSchema,
-  subagentRunOutputJsonSchema
+  subagentCancelSchema,
+  subagentCloseSchema,
+  subagentContinueSchema,
+  subagentLogsSchema,
+  subagentResultSchema,
+  subagentRunSchema,
+  subagentStartManySchema,
+  subagentStartSchema,
+  subagentWaitSchema,
 } from "./tools/schemas.js";
 
 /**
- * 启动 MCP Server。
+ * MCP Server 创建结果。
  */
-export async function startMcpServer(config: AppConfig): Promise<void> {
-  const concurrency = new ConcurrencyManager();
-  const registry = new TaskRegistry();
-  const deps: SubagentTaskRunnerDependencies = { config, concurrency, registry };
-  const server = new Server(
+export interface CreatedServer {
+  /** MCP Server 实例。 */
+  server: McpServer;
+
+  /** 子代理运行时。 */
+  runtime: SubagentRuntime;
+}
+
+/**
+ * 创建并注册所有 MCP tools。
+ *
+ * @param config 已加载的服务器配置。
+ * @returns MCP Server 与运行时对象。
+ */
+export function createServer(config: ServerConfig): CreatedServer {
+  const runtime = new SubagentRuntime(config);
+  const server = new McpServer(
+    { name: "@rvaim/acp-subagent-mcp", version: "0.1.5" },
     {
-      name: "@rvaim/acp-subagent-mcp",
-      version: getPackageVersion()
+      instructions:
+        "这是一个通用 ACP 子代理编排 MCP Server。优先使用 subagent_list 查看可用子代理；短任务使用 subagent_run；需要并行、多轮或取消时使用 subagent_start/subagent_wait/subagent_continue/subagent_cancel/subagent_close。",
     },
-    {
-      capabilities: {
-        tools: {}
-      }
-    }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: buildToolDefinitions()
-  }));
+  server.registerTool(
+    "subagent_list",
+    {
+      title: "列出可用子代理",
+      description: "列出 agents.toml 中配置的子代理，只返回 name、description 和 capabilities，不暴露 command、env 或敏感路径。",
+      inputSchema: {},
+    },
+    async () => toToolResult(runtime.listAgents()),
+  );
 
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const { name, arguments: args } = request.params;
-    const requestScope = createRequestScope({ config, toolName: name, signal: extra.signal, meta: extra._meta, sendNotification: extra.sendNotification });
-    const requestDeps: SubagentTaskRunnerDependencies = { ...deps, requestSignal: requestScope.signal };
+  server.registerTool(
+    "subagent_run",
+    {
+      title: "同步运行子代理任务",
+      description: "拉起或复用一个 ACP 子代理 session，发送结构化任务，等待结果并返回压缩后的结构化输出。",
+      inputSchema: subagentRunSchema,
+    },
+    async (input) => toToolResult(await runtime.run(input)),
+  );
 
-    try {
-      if (name === "subagent_list") return toMcpResult(handleSubagentList(config));
-      if (name === "subagent_run") return toMcpResult(await handleSubagentRun(args ?? {}, requestDeps));
-      if (name === "subagent_run_many") return toMcpResult(await handleSubagentRunMany(args ?? {}, requestDeps));
-      if (name === "subagent_revise") return toMcpResult(await handleSubagentRevise(args ?? {}, requestDeps));
-      if (name === "subagent_revise_many") return toMcpResult(await handleSubagentReviseMany(args ?? {}, requestDeps));
-      if (name === "subagent_skills") return toMcpResult(await handleSubagentSkills(args ?? {}, config));
+  server.registerTool(
+    "subagent_start",
+    {
+      title: "启动有状态子代理任务",
+      description: "启动一个子代理任务并立即返回 task_id，适合异步等待、取消或后续 continue。",
+      inputSchema: subagentStartSchema,
+    },
+    async (input) => toToolResult(await runtime.start(input)),
+  );
 
-      return toMcpError(new Error(`未知工具：${name}`));
-    } catch (error) {
-      return toMcpError(error);
-    } finally {
-      requestScope.dispose();
-    }
+  server.registerTool(
+    "subagent_start_many",
+    {
+      title: "并行启动多个子代理任务",
+      description: "并行启动多个子代理任务，返回每个任务的 task_id。",
+      inputSchema: subagentStartManySchema,
+    },
+    async (input) => toToolResult(await runtime.startMany(input)),
+  );
+
+  server.registerTool(
+    "subagent_wait",
+    {
+      title: "等待子代理任务",
+      description: "等待一个或多个子代理任务，支持 all_completed、first_completed、first_success、first_failure、any_update、timeout_partial。",
+      inputSchema: subagentWaitSchema,
+    },
+    async (input) => toToolResult(await runtime.wait(input)),
+  );
+
+  server.registerTool(
+    "subagent_result",
+    {
+      title: "查询子代理任务结果",
+      description: "查询某个 task_id 的当前状态、部分输出或最终结果。",
+      inputSchema: subagentResultSchema,
+    },
+    async (input) => toToolResult(runtime.result(input)),
+  );
+
+  server.registerTool(
+    "subagent_continue",
+    {
+      title: "继续子代理会话",
+      description: "对 subagent_start 创建且 keep_alive=true 的同一个 ACP session 继续发送消息。",
+      inputSchema: subagentContinueSchema,
+    },
+    async (input) => toToolResult(await runtime.continue(input)),
+  );
+
+  server.registerTool(
+    "subagent_cancel",
+    {
+      title: "取消子代理任务",
+      description: "取消一个或多个任务，优先发送 ACP session/cancel，然后清理子进程。",
+      inputSchema: subagentCancelSchema,
+    },
+    async (input) => toToolResult(await runtime.cancel(input)),
+  );
+
+  server.registerTool(
+    "subagent_close",
+    {
+      title: "关闭子代理任务",
+      description: "关闭已完成或不再需要的有状态 session，并保留日志。",
+      inputSchema: subagentCloseSchema,
+    },
+    async (input) => toToolResult(await runtime.close(input)),
+  );
+
+  server.registerTool(
+    "subagent_logs",
+    {
+      title: "读取子代理日志",
+      description: "读取任务日志文件尾部，默认只读取 events 日志，避免把完整日志塞回主代理上下文。",
+      inputSchema: subagentLogsSchema,
+    },
+    async (input) => toToolResult(await runtime.logs(input)),
+  );
+
+  return { server, runtime };
+}
+
+/**
+ * 通过 stdio 启动 MCP Server。
+ *
+ * @param config 已加载的服务器配置。
+ */
+export async function startStdioServer(config: ServerConfig): Promise<void> {
+  const { server, runtime } = createServer(config);
+  const transport = new StdioServerTransport();
+
+  const shutdown = async (): Promise<void> => {
+    await runtime.shutdown();
+  };
+
+  process.once("SIGINT", () => {
+    void shutdown().finally(() => process.exit(0));
+  });
+  process.once("SIGTERM", () => {
+    void shutdown().finally(() => process.exit(0));
   });
 
-  installShutdownHooks(server, deps);
-  const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-interface RequestScopeOptions {
-  config: AppConfig;
-  toolName: string;
-  signal: AbortSignal;
-  meta?: { progressToken?: string | number };
-  sendNotification: (notification: ServerNotification) => Promise<void>;
-}
-
-interface RequestScope {
-  signal: AbortSignal;
-  dispose: () => void;
-}
-
 /**
- * 为单次 MCP tool call 创建本地 request scope。
+ * 将普通对象包装成 MCP tool result。
  *
- * 所有子代理操作都是同步 tool call；Host 取消当前请求时，该 signal 会级联到
- * 正在运行的子代理进程树。heartbeat 只用于长同步请求期间向 Host 报告进度。
+ * @param value 结构化输出。
+ * @returns MCP tool 返回值。
  */
-function createRequestScope(options: RequestScopeOptions): RequestScope {
-  const controller = new AbortController();
-  let disposed = false;
-  let heartbeat: NodeJS.Timeout | undefined;
-
-  const abort = (reason: unknown) => {
-    if (!controller.signal.aborted) controller.abort(reason);
-  };
-  const relayAbort = () => abort(options.signal.reason ?? new Error("MCP request cancelled"));
-
-  if (options.signal.aborted) {
-    relayAbort();
-  } else {
-    options.signal.addEventListener("abort", relayAbort, { once: true });
-  }
-
-  const heartbeatMs = options.config.defaults.mcp_request_heartbeat_ms;
-  const progressToken = options.meta?.progressToken;
-  if (heartbeatMs > 0 && progressToken !== undefined) {
-    let progress = 0;
-    heartbeat = setInterval(() => {
-      if (disposed || controller.signal.aborted) return;
-      progress += 1;
-      void options.sendNotification({
-        method: "notifications/progress",
-        params: {
-          progressToken,
-          progress,
-          message: `${options.toolName} running`
-        }
-      }).catch((error) => {
-        abort(error instanceof Error ? error : new Error(String(error)));
-      });
-    }, heartbeatMs);
-    heartbeat.unref?.();
-  }
-
+function toToolResult(value: unknown): CallToolResult {
+  const text = JSON.stringify(value, null, 2);
   return {
-    signal: controller.signal,
-    dispose: () => {
-      disposed = true;
-      if (heartbeat) clearInterval(heartbeat);
-      options.signal.removeEventListener("abort", relayAbort);
-    }
+    content: [{ type: "text", text }],
+    structuredContent: isRecord(value) ? value : { value },
   };
 }
 
 /**
- * 安装 MCP transport 和 Node 进程级清理钩子。
+ * 判断 unknown 是否为普通对象。
+ *
+ * @param value 待检查值。
+ * @returns 是普通对象时返回 true。
  */
-function installShutdownHooks(server: Server, deps: SubagentTaskRunnerDependencies): void {
-  let shuttingDown = false;
-  const shutdown = async (reason: string): Promise<void> => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    await shutdownAllActiveTasks(deps, reason).catch(() => undefined);
-  };
-
-  server.onclose = () => {
-    void shutdown("MCP transport 已关闭");
-  };
-
-  const shutdownOnStdinClose = () => {
-    void shutdown("MCP stdin 已关闭").finally(() => {
-      process.exit(0);
-    });
-  };
-  process.stdin.once("end", shutdownOnStdinClose);
-  process.stdin.once("close", shutdownOnStdinClose);
-
-  process.once("SIGINT", () => {
-    void shutdown("收到 SIGINT，关闭所有子代理").finally(() => process.exit(130));
-  });
-  process.once("SIGTERM", () => {
-    void shutdown("收到 SIGTERM，关闭所有子代理").finally(() => process.exit(143));
-  });
-  process.once("beforeExit", () => {
-    void shutdown("Node 进程即将退出，关闭所有子代理");
-  });
-}
-
-/**
- * 构造工具定义。
- */
-function buildToolDefinitions(): Tool[] {
-  return [
-    {
-      name: "subagent_list",
-      description: "列出可用 ACP 子代理、默认 agent 和 Skill 桥接状态。",
-      inputSchema: subagentListInputJsonSchema as unknown as Tool["inputSchema"],
-      outputSchema: subagentListOutputJsonSchema as unknown as Tool["outputSchema"],
-      annotations: { title: "List ACP subagents", readOnlyHint: true, destructiveHint: false, idempotentHint: true }
-    },
-    {
-      name: "subagent_run",
-      description: "同步运行一个 ACP 子代理；主 agent 会等待子代理完成、失败、超时或取消后才收到结果。",
-      inputSchema: subagentRunInputJsonSchema as unknown as Tool["inputSchema"],
-      outputSchema: subagentRunOutputJsonSchema as unknown as Tool["outputSchema"],
-      annotations: { title: "Run one subagent synchronously", readOnlyHint: false, destructiveHint: false, idempotentHint: false }
-    },
-    {
-      name: "subagent_run_many",
-      description: "同步并行运行多个 ACP 子代理；内部并发，全部子代理返回后才把结果交给主 agent；不会产生 pending task。",
-      inputSchema: subagentRunManyInputJsonSchema as unknown as Tool["inputSchema"],
-      outputSchema: subagentRunManyOutputJsonSchema as unknown as Tool["outputSchema"],
-      annotations: { title: "Run many subagents synchronously", readOnlyHint: false, destructiveHint: false, idempotentHint: false }
-    },
-    {
-      name: "subagent_revise",
-      description: "同步打回重写一个子代理结果；不复用后台进程，只把上一轮结果和审核意见作为新同步任务上下文。",
-      inputSchema: subagentReviseInputJsonSchema as unknown as Tool["inputSchema"],
-      outputSchema: subagentRunOutputJsonSchema as unknown as Tool["outputSchema"],
-      annotations: { title: "Revise one subagent result synchronously", readOnlyHint: false, destructiveHint: false, idempotentHint: false }
-    },
-    {
-      name: "subagent_revise_many",
-      description: "同步并行打回重写多个子代理结果；全部重写任务返回后才把结果交给主 agent。",
-      inputSchema: subagentReviseManyInputJsonSchema as unknown as Tool["inputSchema"],
-      outputSchema: subagentRunManyOutputJsonSchema as unknown as Tool["outputSchema"],
-      annotations: { title: "Revise many subagent results synchronously", readOnlyHint: false, destructiveHint: false, idempotentHint: false }
-    },
-    {
-      name: "subagent_skills",
-      description: "查询父代理环境中可桥接给子代理的 Skills。",
-      inputSchema: subagentSkillsInputJsonSchema as unknown as Tool["inputSchema"],
-      outputSchema: subagentSkillsOutputJsonSchema as unknown as Tool["outputSchema"],
-      annotations: { title: "List bridgeable skills", readOnlyHint: true, destructiveHint: false, idempotentHint: true }
-    }
-  ];
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

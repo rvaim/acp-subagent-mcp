@@ -1,40 +1,122 @@
-import type { ContentBlock, InitializeResponse, NewSessionResponse } from "@agentclientprotocol/sdk";
-import type { ToolCallSummary } from "../task/types.js";
-
 /**
- * ACP 内容块。
- *
- * 该类型直接来自官方 `@agentclientprotocol/sdk`，避免在本项目中重复手写 ACP schema。
+ * JSON-RPC 请求 ID。
  */
-export type AcpContentBlock = ContentBlock;
+export type JsonRpcId = string | number;
 
 /**
- * ACP initialize 返回结果。
- *
- * 该类型直接复用官方 `@agentclientprotocol/sdk` 的 `InitializeResponse`。
+ * JSON-RPC 请求消息。
  */
-export type AcpInitializeResult = InitializeResponse;
+export interface JsonRpcRequest {
+  /** JSON-RPC 版本，固定为 2.0。 */
+  jsonrpc: "2.0";
+
+  /** 请求 ID，用于关联响应。 */
+  id: JsonRpcId;
+
+  /** 方法名。 */
+  method: string;
+
+  /** 请求参数。 */
+  params?: unknown;
+}
 
 /**
- * ACP session/new 返回结果。
- *
- * 该类型直接复用官方 `@agentclientprotocol/sdk` 的 `NewSessionResponse`。
+ * JSON-RPC 通知消息。
  */
-export type AcpNewSessionResult = NewSessionResponse;
+export interface JsonRpcNotification {
+  /** JSON-RPC 版本，固定为 2.0。 */
+  jsonrpc: "2.0";
+
+  /** 方法名。 */
+  method: string;
+
+  /** 通知参数。 */
+  params?: unknown;
+}
 
 /**
- * ACP prompt 聚合结果。
- *
- * ACP `session/prompt` 的协议响应只包含 stopReason 等元信息；
- * 真实文本、工具调用和文件触碰信息来自 `session/update`，因此本项目在 SDK 之上保留该内部聚合类型。
+ * JSON-RPC 成功响应消息。
+ */
+export interface JsonRpcSuccessResponse {
+  /** JSON-RPC 版本，固定为 2.0。 */
+  jsonrpc: "2.0";
+
+  /** 请求 ID。 */
+  id: JsonRpcId;
+
+  /** 响应结果。 */
+  result: unknown;
+}
+
+/**
+ * JSON-RPC 错误对象。
+ */
+export interface JsonRpcErrorObject {
+  /** 标准或自定义错误码。 */
+  code: number;
+
+  /** 错误说明。 */
+  message: string;
+
+  /** 可选错误详情。 */
+  data?: unknown;
+}
+
+/**
+ * JSON-RPC 错误响应消息。
+ */
+export interface JsonRpcErrorResponse {
+  /** JSON-RPC 版本，固定为 2.0。 */
+  jsonrpc: "2.0";
+
+  /** 请求 ID。 */
+  id: JsonRpcId;
+
+  /** 错误对象。 */
+  error: JsonRpcErrorObject;
+}
+
+/**
+ * 任意 JSON-RPC 消息。
+ */
+export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcSuccessResponse | JsonRpcErrorResponse;
+
+/**
+ * ACP prompt 返回结果。
  */
 export interface AcpPromptResult {
-  /** ACP stop reason。 */
-  stopReason: string;
-  /** 从 session/update 聚合出的 agent 文本。 */
-  text: string;
-  /** 工具调用摘要。 */
-  toolCalls: ToolCallSummary[];
-  /** 子代理触碰过的文件。 */
-  filesTouched: string[];
+  /** 停止原因，例如 end_turn、cancelled、max_tokens。 */
+  stopReason?: string;
+
+  /** ACP agent 返回的其他字段。 */
+  [key: string]: unknown;
 }
+
+/**
+ * ACP session/update 通知参数。
+ */
+export interface AcpSessionUpdateParams {
+  /** ACP session id。 */
+  sessionId?: string;
+
+  /** 更新体。 */
+  update?: Record<string, unknown>;
+
+  /** 其他协议字段。 */
+  [key: string]: unknown;
+}
+
+/**
+ * ACP client 请求处理器。
+ */
+export type AcpClientRequestHandler = (request: JsonRpcRequest) => Promise<unknown>;
+
+/**
+ * ACP 通知处理器。
+ */
+export type AcpNotificationHandler = (notification: JsonRpcNotification) => void | Promise<void>;
+
+/**
+ * 心跳更新回调。
+ */
+export type HeartbeatHandler = () => void;

@@ -1,60 +1,31 @@
-# @rvaim/acp-subagent-mcp 高级配置示例。
-# 一般用户不需要这个文件；默认配置已经使用 claude-agent-acp 作为子代理命令。
-# 本 MCP 包不会自动安装任何具体 ACP adapter；请确保 command 已在 PATH，或改成绝对路径。
-
 [defaults]
-default_agent = "claude"
-timeout_secs = 600
-inactivity_timeout_secs = 15
+timeout_secs = 60
+inactivity_timeout_secs = 30
+heartbeat_timeout_secs = 3
 max_depth = 2
 max_prompt_chars = 120000
 max_inline_file_chars = 30000
-log_dir = ".subagents/runs"
-mcp_request_heartbeat_ms = 1000
-acp_cancel_grace_ms = 500
-process_kill_grace_ms = 500
+max_tool_output_chars = 12000
+default_detail_level = "summary"
+log_dir = ".subagent-runs"
+session_ttl_secs = 1800
+completed_session_ttl_secs = 600
+max_active_sessions = 8
 
 [security]
-# 默认不需要写死根目录；MCP tool 传入的 cwd 会被视为当前工作区。
-# 如需严格限制，再填入固定项目目录，例如 ["/Users/you/workspace"]。
-allowed_cwd_roots = []
-auto_workspace_roots = true
+allowed_cwd_roots = [".", "/tmp"]
 allow_network = false
-max_read_file_bytes = 1048576
-require_absolute_agent_command = false
 
 [concurrency]
 max_parallel_tasks = 4
 default_conflict_policy = "single_writer_per_cwd"
 
-[skills]
+[session_pool]
 enabled = true
-default_mode = "list" # off | list | inline
-include_project_skills = true
-include_user_skills = true
-discovery_roots = []
-default_names = []
-max_skills = 20
-max_description_chars = 360
-max_skill_chars = 8000
-max_total_skill_chars = 20000
-
-[worktree]
-enabled = false
-base_dir = ".subagents/worktrees"
-keep_on_failure = true
-keep_on_success = false
-max_patch_bytes = 2000000
-include_untracked = false
-
-[logs]
-enabled = true
-redact = true
-retention_days = 7
-max_event_bytes = 10485760
-max_stderr_bytes = 1048576
-save_rendered_prompt = "redacted"
-file_mode = "0600"
+max_pooled_sessions_per_parent = 4
+max_context_usage_ratio = 0.9
+idle_ttl_secs = 1800
+reuse_policy = "auto"
 
 [permissions.default]
 read = "allow"
@@ -63,75 +34,31 @@ edit = "deny"
 execute = "deny"
 network = "deny"
 
-[permissions.claude]
+[permissions.fake]
 read = "allow"
 search = "allow"
-edit = "allow"
+edit = "deny"
 execute = "deny"
 network = "deny"
 
-[agents.claude]
-description = "默认 Claude ACP 子代理，适合代码审查、实现、调试和打回重写。"
-command = "claude-agent-acp"
-args = []
-capabilities = ["claude", "code", "review", "analysis", "edit", "skills"]
-env_policy = "all" # all | allowlist | none
-# env_allowlist 只在 env_policy="allowlist" 时生效，支持 ANTHROPIC_* 这种前缀通配。
-# env_allowlist = ["ANTHROPIC_*", "CLAUDE_*", "PATH", "HOME", "USERPROFILE"]
-system_prompt = """
-你是一个被父代理调用的 Claude 子代理。
-严格遵守任务边界，只返回最终结果，不输出隐藏推理。
-如果 prompt 中提供了父代理 Skill 清单，请优先遵守相关项目约定。
-"""
-install_hint = "请确认 claude-agent-acp 已在 PATH，或通过 ACP_SUBAGENT_DEFAULT_AGENT_COMMAND 指定绝对路径。本 MCP 包不会自动安装具体子代理 adapter。"
-
-# 默认 env_policy="all" 已经继承宿主环境。只有需要显式覆盖时才添加 [agents.claude.env]。
-# [agents.claude.env]
-# ANTHROPIC_API_KEY = { from_env = "ANTHROPIC_API_KEY" }
-
-[agents.mock]
-description = "本地测试用 ACP mock agent。"
+[agents.fake]
+description = "本地示例 ACP agent，用于验证 MCP Server 能否跑通 initialize、session/new 和 session/prompt。"
 command = "node"
-args = ["/absolute/path/to/acp-subagent-mcp/dist/test/fixtures/mock-acp-agent.js"]
-capabilities = ["analysis", "review"]
-env_policy = "none"
-system_prompt = "你是一个测试用子代理，只返回简短 JSON。"
+args = ["examples/fake-acp-agent.mjs"]
+capabilities = ["analysis", "review", "demo"]
+system_prompt = """
+你是一个示例子代理。你只用于本地连通性测试。
+"""
 
-[agents.codex]
-description = "适合代码实现、补丁、测试和代码审查。"
-command = "codex-acp"
-args = []
-capabilities = ["code", "review", "edit"]
-env_policy = "all"
+# 真实 agent 示例：按你的机器实际情况取消注释并修改 command。
+# [agents.gemini]
+# description = "适合大上下文分析、方案比较和第二意见。"
+# command = "gemini"
+# args = ["--acp"]
+# capabilities = ["analysis", "review"]
 
-[permissions.codex]
-read = "allow"
-search = "allow"
-edit = "allow"
-execute = "deny"
-network = "deny"
-
-[agents.gemini]
-description = "适合大上下文分析、方案比较和第二意见。"
-command = "gemini"
-args = ["--acp"]
-capabilities = ["analysis", "review"]
-env_policy = "all"
-
-[agents.custom]
-description = "自定义 ACP agent 示例。"
-command = "/absolute/path/to/custom-agent"
-args = ["--acp"]
-capabilities = ["analysis"]
-env_policy = "all"
-
-[agents.custom.env]
-CUSTOM_AGENT_TOKEN = { from_env = "CUSTOM_AGENT_TOKEN" }
-
-# 禁止主 agent 传任意 mcpServers；如需连接 MCP Server，只能引用这里的 profile。
-[mcp_servers.filesystem]
-enabled = false
-transport = "stdio"
-command = "/absolute/path/to/filesystem-mcp"
-args = ["--stdio"]
-allowed_agents = ["claude", "codex", "gemini"]
+# [agents.codex]
+# description = "适合代码实现、补丁、测试和代码审查。"
+# command = "codex-acp"
+# args = []
+# capabilities = ["code", "review", "edit"]

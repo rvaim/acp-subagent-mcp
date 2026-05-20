@@ -1,126 +1,107 @@
-import { mkdir, writeFile, appendFile, chmod } from "node:fs/promises";
+import fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-import type { LogsConfig } from "../config/types.js";
-import { redactJson, redactText } from "./redact.js";
+import { randomBytes } from "node:crypto";
+import { redactJsonString, redactText, redactValue } from "./redact.js";
 
 /**
  * 单次子代理运行的日志路径集合。
  */
 export interface RunLogPaths {
-  /** 运行目录。 */
+  /** 本次运行的日志目录。 */
   runDir: string;
-  /** 任务 JSON。 */
-  taskJson: string;
-  /** 渲染后的 prompt。 */
-  renderedPrompt: string;
-  /** ACP 事件日志。 */
-  eventsJsonl: string;
-  /** 子进程 stderr。 */
-  stderrLog: string;
-  /** 最终结果 JSON。 */
-  resultJson: string;
+
+  /** 脱敏后的结构化任务文件。 */
+  taskPath: string;
+
+  /** 实际发送给子代理的 prompt 文件。 */
+  renderedPromptPath: string;
+
+  /** 原始 ACP 事件 JSONL 文件。 */
+  eventsPath: string;
+
+  /** 子进程 stderr 日志文件。 */
+  stderrPath: string;
+
+  /** 最终结果文件。 */
+  resultPath: string;
 }
 
 /**
- * 运行日志写入器。
+ * 创建单次运行的日志目录。
+ *
+ * @param baseDir 配置中的日志根目录。
+ * @returns 日志路径集合。
  */
-export class RunLogger {
-  /** 日志路径。 */
-  readonly paths: RunLogPaths;
-  /** 日志配置。 */
-  private readonly config: LogsConfig;
-  /** 已写入事件字节数。 */
-  private eventBytes = 0;
-  /** 已写入 stderr 字节数。 */
-  private stderrBytes = 0;
+export async function createRunLogs(baseDir: string): Promise<RunLogPaths> {
+  const now = new Date();
+  const safeTimestamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+  const suffix = randomBytes(4).toString("hex");
+  const runDir = path.resolve(baseDir, `run_${safeTimestamp}_${suffix}`);
 
-  /**
-   * 创建日志写入器。
-   */
-  constructor(paths: RunLogPaths, config: LogsConfig) {
-    this.paths = paths;
-    this.config = config;
-  }
+  await fs.mkdir(runDir, { recursive: true });
 
-  /**
-   * 写入 JSON 文件。
-   */
-  async writeJson(relativeName: "task.json" | "result.json", value: unknown): Promise<void> {
-    if (!this.config.enabled) return;
-    const target = relativeName === "task.json" ? this.paths.taskJson : this.paths.resultJson;
-    const safeValue = this.config.redact ? redactJson(value) : value;
-    await writeFileSecure(target, `${JSON.stringify(safeValue, null, 2)}\n`);
-  }
-
-  /**
-   * 写入渲染后的 prompt。
-   */
-  async writePrompt(prompt: string): Promise<void> {
-    if (!this.config.enabled || this.config.save_rendered_prompt === "off") return;
-    const content = this.config.save_rendered_prompt === "redacted" ? redactText(prompt) : prompt;
-    await writeFileSecure(this.paths.renderedPrompt, content);
-  }
-
-  /**
-   * 追加 ACP 事件。
-   */
-  async appendEvent(event: unknown): Promise<void> {
-    if (!this.config.enabled || this.eventBytes >= this.config.max_event_bytes) return;
-    const safeEvent = this.config.redact ? redactJson(event) : event;
-    const line = `${JSON.stringify(safeEvent)}\n`;
-    const lineBytes = Buffer.byteLength(line, "utf8");
-    if (this.eventBytes + lineBytes > this.config.max_event_bytes) return;
-    this.eventBytes += lineBytes;
-    await appendFile(this.paths.eventsJsonl, line, { mode: 0o600 });
-  }
-
-  /**
-   * 追加子进程 stderr。
-   */
-  async appendStderr(chunk: string): Promise<void> {
-    if (!this.config.enabled || this.stderrBytes >= this.config.max_stderr_bytes) return;
-    const safeChunk = this.config.redact ? redactText(chunk) : chunk;
-    const chunkBytes = Buffer.byteLength(safeChunk, "utf8");
-    const remaining = this.config.max_stderr_bytes - this.stderrBytes;
-    const finalChunk = chunkBytes > remaining ? safeChunk.slice(0, remaining) : safeChunk;
-    this.stderrBytes += Buffer.byteLength(finalChunk, "utf8");
-    await appendFile(this.paths.stderrLog, finalChunk, { mode: 0o600 });
-  }
-}
-
-/**
- * 创建单次运行日志目录。
- */
-export async function createRunLogger(options: {
-  cwd: string;
-  logDir: string;
-  taskId: string;
-  config: LogsConfig;
-}): Promise<RunLogger> {
-  const baseDir = path.isAbsolute(options.logDir) ? options.logDir : path.resolve(options.cwd, options.logDir);
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const runDir = path.join(baseDir, `run_${timestamp}_${options.taskId}_${randomUUID().slice(0, 8)}`);
-
-  if (options.config.enabled) {
-    await mkdir(runDir, { recursive: true, mode: 0o700 });
-    await chmod(runDir, 0o700).catch(() => undefined);
-  }
-
-  return new RunLogger({
+  return {
     runDir,
-    taskJson: path.join(runDir, "task.json"),
-    renderedPrompt: path.join(runDir, "rendered_prompt.md"),
-    eventsJsonl: path.join(runDir, "events.jsonl"),
-    stderrLog: path.join(runDir, "stderr.log"),
-    resultJson: path.join(runDir, "result.json")
-  }, options.config);
+    taskPath: path.join(runDir, "task.json"),
+    renderedPromptPath: path.join(runDir, "rendered_prompt.md"),
+    eventsPath: path.join(runDir, "events.jsonl"),
+    stderrPath: path.join(runDir, "stderr.log"),
+    resultPath: path.join(runDir, "result.json"),
+  };
 }
 
 /**
- * 使用 0600 权限安全写入文件。
+ * 写入脱敏 JSON 文件。
+ *
+ * @param filePath 文件路径。
+ * @param value 要写入的数据。
  */
-async function writeFileSecure(filePath: string, content: string): Promise<void> {
-  await writeFile(filePath, content, { mode: 0o600 });
-  await chmod(filePath, 0o600).catch(() => undefined);
+export async function writeRedactedJson(filePath: string, value: unknown): Promise<void> {
+  await fs.writeFile(filePath, `${redactJsonString(value, 2)}\n`, "utf8");
+}
+
+/**
+ * 写入脱敏文本文件。
+ *
+ * @param filePath 文件路径。
+ * @param text 要写入的文本。
+ */
+export async function writeRedactedText(filePath: string, text: string): Promise<void> {
+  await fs.writeFile(filePath, redactText(text), "utf8");
+}
+
+/**
+ * 追加一条脱敏事件到 JSONL 日志。
+ *
+ * @param filePath 事件日志路径。
+ * @param event 原始事件。
+ */
+export async function appendEventLog(filePath: string, event: unknown): Promise<void> {
+  const line = JSON.stringify({ ts: new Date().toISOString(), event: redactValue(event) });
+  await fs.appendFile(filePath, `${line}\n`, "utf8");
+}
+
+/**
+ * 追加脱敏 stderr 文本。
+ *
+ * @param filePath stderr 日志路径。
+ * @param chunk 原始 stderr 文本片段。
+ */
+export async function appendStderrLog(filePath: string, chunk: string): Promise<void> {
+  await fs.appendFile(filePath, redactText(chunk), "utf8");
+}
+
+/**
+ * 读取日志文件的尾部内容。
+ *
+ * @param filePath 日志文件路径。
+ * @param maxChars 最大返回字符数。
+ * @returns 日志尾部内容。
+ */
+export async function readLogTail(filePath: string, maxChars: number): Promise<string> {
+  const raw = await fs.readFile(filePath, "utf8");
+  if (raw.length <= maxChars) {
+    return raw;
+  }
+  return raw.slice(raw.length - maxChars);
 }

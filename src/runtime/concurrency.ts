@@ -1,59 +1,84 @@
-import type { AppConfig } from "../config/types.js";
-import type { ConflictPolicy } from "../task/types.js";
-import { SubagentRuntimeError } from "./errors.js";
+import type { SubagentTask } from "../task/types.js";
+import { isWriteTask } from "./security.js";
 
 /**
- * 并发锁释放函数。
+ * 并发占用记录。
  */
-export type ReleaseConcurrencyLock = () => void;
+interface ConcurrencyLease {
+  /** 占用 ID，通常是 task_id。 */
+  id: string;
+
+  /** 工作目录。 */
+  cwd: string;
+
+  /** 是否为写任务。 */
+  write: boolean;
+}
 
 /**
- * 子代理任务并发控制器。
+ * 子代理并发与写冲突控制器。
  */
-export class ConcurrencyManager {
-  /** 当前活跃任务数。 */
-  private activeTasks = 0;
-  /** 每个 cwd 当前写任务数量。 */
-  private writersByCwd = new Map<string, number>();
+export class ConcurrencyGuard {
+  /** 当前活跃任务占用表。 */
+  private readonly leases = new Map<string, ConcurrencyLease>();
 
   /**
-   * 尝试获取并发锁。
+   * 创建并发控制器。
+   *
+   * @param maxParallelTasks 最大并行任务数。
    */
-  acquire(options: { config: AppConfig; cwd: string; isWriter: boolean; conflictPolicy?: ConflictPolicy }): ReleaseConcurrencyLock {
-    if (this.activeTasks >= options.config.concurrency.max_parallel_tasks) {
-      throw new SubagentRuntimeError("concurrency_conflict", "活跃子代理任务数已达到上限", { recoverable: true });
+  constructor(private readonly maxParallelTasks: number) {}
+
+  /**
+   * 尝试占用一个并发槽位。
+   *
+   * @param id 占用 ID。
+   * @param cwd 工作目录。
+   * @param task 子代理任务。
+   * @param mode 任务模式。
+   * @param policy 冲突策略。
+   * @throws 当超过最大并发数或写冲突时抛出错误。
+   */
+  acquire(
+    id: string,
+    cwd: string,
+    task: SubagentTask,
+    mode: string | undefined,
+    policy: "allow_readonly_parallel" | "single_writer_per_cwd" | "sandbox_worktree",
+  ): void {
+    if (this.leases.size >= this.maxParallelTasks) {
+      throw new Error(`当前活跃任务数已达到 max_parallel_tasks=${this.maxParallelTasks}`);
     }
 
-    const policy = options.conflictPolicy ?? options.config.concurrency.default_conflict_policy;
-    const currentWriters = this.writersByCwd.get(options.cwd) ?? 0;
-
-    // allow_readonly_parallel 和 single_writer_per_cwd 都不允许同 cwd 多写者；sandbox_worktree 通过独立 worktree 放开。
-    if (options.isWriter && policy !== "sandbox_worktree" && currentWriters > 0) {
-      throw new SubagentRuntimeError("concurrency_conflict", `当前 cwd 已有写任务运行：${options.cwd}`, { recoverable: true });
-    }
-
-    this.activeTasks += 1;
-    if (options.isWriter && policy !== "sandbox_worktree") {
-      this.writersByCwd.set(options.cwd, currentWriters + 1);
-    }
-
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.activeTasks = Math.max(0, this.activeTasks - 1);
-      if (options.isWriter && policy !== "sandbox_worktree") {
-        const current = this.writersByCwd.get(options.cwd) ?? 0;
-        if (current <= 1) this.writersByCwd.delete(options.cwd);
-        else this.writersByCwd.set(options.cwd, current - 1);
+    const write = isWriteTask(task, mode);
+    if (policy !== "sandbox_worktree" && write) {
+      for (const lease of this.leases.values()) {
+        const sameCwd = lease.cwd === cwd;
+        const conflict = policy === "single_writer_per_cwd" ? sameCwd && (lease.write || write) : sameCwd && lease.write;
+        if (conflict) {
+          throw new Error(`检测到同一 cwd 的并行写冲突：${cwd}`);
+        }
       }
-    };
+    }
+
+    this.leases.set(id, { id, cwd, write });
   }
 
   /**
-   * 返回当前活跃任务数，主要用于测试和诊断。
+   * 释放一个并发槽位。
+   *
+   * @param id 占用 ID。
    */
-  getActiveTaskCount(): number {
-    return this.activeTasks;
+  release(id: string): void {
+    this.leases.delete(id);
+  }
+
+  /**
+   * 获取当前活跃任务数。
+   *
+   * @returns 活跃任务数量。
+   */
+  activeCount(): number {
+    return this.leases.size;
   }
 }

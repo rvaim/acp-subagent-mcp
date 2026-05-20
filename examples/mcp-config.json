@@ -1,16 +1,10 @@
 {
   "mcpServers": {
-    "acp-subagent": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "@rvaim/acp-subagent-mcp"
-      ],
+    "@rvaim/acp-subagent-mcp": {
+      "command": "node",
+      "args": ["/path/to/acp-subagent-mcp/dist/index.js"],
       "env": {
-        "ACP_SUBAGENT_DEFAULT_AGENT": "claude",
-        "ACP_SUBAGENT_ENV_POLICY": "all",
-        "ACP_SUBAGENT_SKILL_MODE": "list"
+        "SUBAGENT_MCP_CONFIG": "/path/to/acp-subagent-mcp/examples/agents.toml"
       }
     }
   }

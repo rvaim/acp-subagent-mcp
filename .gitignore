@@ -1,6 +1,5 @@
 node_modules/
 dist/
-.subagents/runs/
-.subagents/worktrees/
+.subagent-runs/
 .env
 *.log

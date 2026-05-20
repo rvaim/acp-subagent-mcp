@@ -1,212 +1,88 @@
-import type {
-  FileChange,
-  Finding,
-  SubagentError,
-  SubagentOutputOptions,
-  SubagentRunOutput,
-  SubagentRunStatus,
-  SubagentStructuredResult,
-  ToolCallSummary
-} from "./types.js";
-import { makeSubagentError } from "../runtime/errors.js";
-import type { SkillPromptContext } from "../skills/skillBridge.js";
+import type { SubagentStructuredResult } from "./types.js";
 
 /**
- * 解析子代理输出。
+ * 解析子代理输出结果。
+ *
+ * 解析策略：优先提取 JSON code block；如果没有 JSON code block，则尝试完整输出 JSON.parse；
+ * 如果 parse 失败，则降级为 raw text，不因为非严格 JSON 直接判定工具失败。
+ *
+ * @param rawOutput 子代理原始文本输出。
+ * @returns 结构化结果。
  */
-export function parseSubagentResult(rawText: string): SubagentStructuredResult {
-  const trimmed = rawText.trim();
-  const candidate = extractJsonCandidate(trimmed);
+export function parseSubagentResult(rawOutput: string): SubagentStructuredResult {
+  const trimmed = rawOutput.trim();
+  const jsonCandidate = extractJsonCodeBlock(trimmed) ?? trimmed;
 
-  if (candidate) {
-    try {
-      const parsed = JSON.parse(candidate) as Record<string, unknown>;
-      return normalizeStructuredResult(parsed, rawText);
-    } catch {
-      // 降级到纯文本解析。
-    }
+  try {
+    const parsed = JSON.parse(jsonCandidate) as Partial<SubagentStructuredResult>;
+    return normalizeParsedResult(parsed, rawOutput);
+  } catch {
+    return fallbackTextResult(rawOutput);
   }
-
-  return {
-    status: "completed",
-    summary: firstNonEmptyLine(trimmed) || "子代理已返回结果，但不是严格 JSON。",
-    result: trimmed || "子代理没有返回可见文本。",
-    raw_output: rawText,
-    errors: [makeSubagentError("result_parse_failed", "子代理输出不是严格 JSON，已降级为文本结果", { recoverable: true })]
-  };
 }
 
 /**
- * 根据 stopReason 和结构化结果推导最终状态。
+ * 从 Markdown 文本中提取 JSON code block。
+ *
+ * @param text 原始文本。
+ * @returns JSON 文本；未找到时返回 undefined。
  */
-export function deriveRunStatus(stopReason: string | undefined, structured: SubagentStructuredResult, forcedStatus?: SubagentRunStatus): SubagentRunStatus {
-  if (forcedStatus) return forcedStatus;
-  if (stopReason === "cancelled") return "cancelled";
-  if (stopReason === "max_tokens" || stopReason === "max_turn_requests") return "partial";
-  if (stopReason === "refusal") return "failed";
-  if (structured.status === "failed") return "failed";
-  if (structured.status === "partial") return "partial";
-  return "completed";
+function extractJsonCodeBlock(text: string): string | undefined {
+  const jsonBlock = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  return jsonBlock?.[1]?.trim();
 }
 
 /**
- * 构造面向 MCP 的紧凑输出。
+ * 将已解析 JSON 归一化成 SubagentStructuredResult。
+ *
+ * @param parsed 已解析对象。
+ * @param rawOutput 原始输出。
+ * @returns 归一化结构化结果。
  */
-export function buildRunOutput(options: {
-  status: SubagentRunStatus;
-  agentType: string;
-  sessionId?: string;
-  stopReason?: string;
-  structured: SubagentStructuredResult;
-  elapsedMs: number;
-  artifacts?: SubagentRunOutput["artifacts"];
-  toolCalls: ToolCallSummary[];
-  filesTouched: string[];
-  outputOptions: Required<SubagentOutputOptions>;
-  skillContext?: SkillPromptContext;
-  extraErrors?: SubagentError[];
-}): SubagentRunOutput {
-  const maxResultChars = options.outputOptions.max_result_chars;
-  const rawResult = options.structured.result ?? options.structured.raw_output ?? "";
-  const truncatedResult = rawResult.length > maxResultChars ? `${rawResult.slice(0, maxResultChars)}\n[TRUNCATED]` : rawResult;
-  const maxFindings = options.outputOptions.max_findings;
-  const findings = (options.structured.findings ?? []).slice(0, maxFindings);
-  const errors = [...(options.structured.errors ?? []), ...(options.extraErrors ?? [])];
-  const includeStructured = options.outputOptions.include_structured || options.outputOptions.mode === "full";
-  const includeDiagnostics = options.outputOptions.include_diagnostics || options.outputOptions.mode === "full";
-
-  return {
-    schema_version: 1,
-    status: options.status,
-    agent_type: options.agentType,
-    session_id: options.sessionId,
-    summary: options.structured.summary,
-    result: truncatedResult,
-    findings: findings.length ? findings : undefined,
-    files_changed: options.structured.files_changed,
-    risks: options.structured.risks,
-    next_steps: options.structured.next_steps,
-    structured: includeStructured ? options.structured : undefined,
-    stop_reason: options.stopReason,
-    metrics: {
-      elapsed_ms: options.elapsedMs,
-      returned_result_chars: truncatedResult.length,
-      original_result_chars: rawResult.length
-    },
-    artifacts: options.artifacts,
-    skills: options.skillContext && options.skillContext.mode !== "off"
-      ? {
-          mode: options.skillContext.mode,
-          names: Array.from(new Set([...options.skillContext.listed.map((skill) => skill.name), ...options.skillContext.inlined.map((skill) => skill.name)])),
-          truncated: options.skillContext.truncated || undefined
-        }
-      : undefined,
-    diagnostics: includeDiagnostics
-      ? {
-          tool_calls: options.toolCalls,
-          files_touched: options.filesTouched
-        }
-      : undefined,
-    truncated: rawResult.length > maxResultChars || (options.structured.findings ?? []).length > maxFindings,
-    errors
-  };
-}
-
-/**
- * 从文本中提取 JSON 候选。
- */
-function extractJsonCandidate(text: string): string | undefined {
-  if (!text) return undefined;
-
-  const codeBlock = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (codeBlock?.[1]) return codeBlock[1].trim();
-
-  if (text.startsWith("{") && text.endsWith("}")) return text;
-
-  const firstBrace = text.indexOf("{");
-  const lastBrace = text.lastIndexOf("}");
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return text.slice(firstBrace, lastBrace + 1);
-  }
-
-  return undefined;
-}
-
-/**
- * 规范化结构化结果。
- */
-function normalizeStructuredResult(parsed: Record<string, unknown>, rawText: string): SubagentStructuredResult {
+function normalizeParsedResult(parsed: Partial<SubagentStructuredResult>, rawOutput: string): SubagentStructuredResult {
   const status = parsed.status === "failed" || parsed.status === "partial" || parsed.status === "completed" ? parsed.status : "completed";
-  const result = asString(parsed.result) ?? asString(parsed.details) ?? rawText.trim();
-  const summary = asString(parsed.summary) ?? firstNonEmptyLine(result) ?? "子代理已完成任务。";
+  const summary = typeof parsed.summary === "string" && parsed.summary.trim() ? parsed.summary : summarize(rawOutput);
+  const result = typeof parsed.result === "string" && parsed.result.trim() ? parsed.result : rawOutput.trim();
 
   return {
     status,
     summary,
     result,
-    findings: normalizeFindings(parsed.findings),
-    files_changed: normalizeFileChanges(parsed.files_changed),
-    risks: normalizeStringArray(parsed.risks),
-    next_steps: normalizeStringArray(parsed.next_steps),
-    errors: normalizeErrors(parsed.errors),
-    raw_output: rawText
+    findings: Array.isArray(parsed.findings) ? parsed.findings : undefined,
+    files_changed: Array.isArray(parsed.files_changed) ? parsed.files_changed : undefined,
+    risks: Array.isArray(parsed.risks) ? parsed.risks : undefined,
+    next_steps: Array.isArray(parsed.next_steps) ? parsed.next_steps : undefined,
+    errors: Array.isArray(parsed.errors) ? parsed.errors : undefined,
+    raw_output: rawOutput,
   };
 }
 
 /**
- * 规范化 findings。
+ * 降级为文本结果。
+ *
+ * @param rawOutput 原始输出。
+ * @returns 文本型结构化结果。
  */
-function normalizeFindings(value: unknown): Finding[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value.slice(0, 100).map((item) => {
-    if (typeof item === "string") return { detail: item };
-    if (item && typeof item === "object") return item as Finding;
-    return { detail: String(item) };
-  });
+function fallbackTextResult(rawOutput: string): SubagentStructuredResult {
+  return {
+    status: "completed",
+    summary: summarize(rawOutput),
+    result: rawOutput.trim(),
+    raw_output: rawOutput,
+  };
 }
 
 /**
- * 规范化文件变更。
+ * 从原始输出中生成简短摘要。
+ *
+ * @param rawOutput 原始输出。
+ * @returns 摘要文本。
  */
-function normalizeFileChanges(value: unknown): FileChange[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value.slice(0, 100).flatMap((item) => {
-    if (typeof item === "string") return [{ path: item, action: "unknown" as const }];
-    if (item && typeof item === "object" && "path" in item) return [item as FileChange];
-    return [];
-  });
-}
-
-/**
- * 规范化字符串数组。
- */
-function normalizeStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value.map((item) => String(item)).filter(Boolean);
-}
-
-/**
- * 规范化错误数组。
- */
-function normalizeErrors(value: unknown): SubagentError[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value.flatMap((item) => {
-    if (typeof item === "string") return [makeSubagentError("internal_error", item)];
-    if (item && typeof item === "object" && "code" in item && "user_message" in item) return [item as SubagentError];
-    return [];
-  });
-}
-
-/**
- * 转字符串。
- */
-function asString(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-/**
- * 取第一行非空文本。
- */
-function firstNonEmptyLine(text: string): string | undefined {
-  return text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+function summarize(rawOutput: string): string {
+  const lines = rawOutput
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const firstLine = lines[0] ?? "子代理未返回可见文本";
+  return firstLine.length > 120 ? `${firstLine.slice(0, 117)}...` : firstLine;
 }
