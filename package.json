@@ -1,6 +1,6 @@
 {
   "name": "@rvaim/acp-subagent-mcp",
-  "version": "0.1.9",
+  "version": "0.1.11",
   "description": "通用 ACP 子代理 MCP Server",
   "type": "module",
   "bin": {
@@ -12,7 +12,8 @@
     "dev": "tsx src/index.ts",
     "check": "node ./node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
     "test:fake-agent": "SUBAGENT_MCP_CONFIG=examples/agents.toml node dist/index.js",
-    "test:cancel-heartbeat": "npm run build && node tests/cancellation-and-heartbeat.mjs"
+    "test:cancel-heartbeat": "npm run build && node tests/cancellation-and-heartbeat.mjs",
+    "test:regression": "npm run build && node tests/default-heartbeat-allows-delayed-tool.mjs && node tests/cancellation-and-heartbeat.mjs && node tests/session-pool-reuse.mjs && node tests/default-permissions-allow-write.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

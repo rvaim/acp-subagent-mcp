@@ -72,9 +72,9 @@ reuse_policy = "disable"
 [permissions.default]
 read = "allow"
 search = "allow"
-edit = "deny"
-execute = "deny"
-network = "deny"
+edit = "allow"
+execute = "allow"
+network = "allow"
 
 [agents.delayed]
 description = "测试 tool_call 后短暂静默的 ACP agent"

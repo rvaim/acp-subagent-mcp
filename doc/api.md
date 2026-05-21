@@ -82,7 +82,7 @@
   "cwd": "/absolute/path/to/project",
   "timeout_secs": 600,
   "inactivity_timeout_secs": 120,
-  "heartbeat_timeout_secs": 60,
+  "heartbeat_timeout_secs": 3,
   "mode": "review",
   "session_pool_policy": "auto",
   "detail_level": "summary",

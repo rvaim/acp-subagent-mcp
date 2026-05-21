@@ -24,6 +24,7 @@ export interface RunLogPaths {
 
   /** 最终结果文件。 */
   resultPath: string;
+
 }
 
 /**

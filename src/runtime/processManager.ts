@@ -25,20 +25,208 @@ export interface SpawnAgentInput {
  * @returns 子进程对象。
  */
 export function spawnAcpAgent(input: SpawnAgentInput): ChildProcessWithoutNullStreams {
-  const mergedEnv = {
+  const mergedEnv: NodeJS.ProcessEnv = {
     ...process.env,
     ...input.agent.env,
     ...input.env,
     AGENT_DEPTH: String(Number.parseInt(process.env.AGENT_DEPTH ?? "0", 10) + 1),
   };
 
-  return spawn(input.agent.command, input.agent.args, {
+  const useParentHeartbeatSupervisor = Boolean(mergedEnv.SUBAGENT_MCP_PARENT_HEARTBEAT_TIMEOUT_MS);
+  const command = useParentHeartbeatSupervisor ? process.execPath : input.agent.command;
+  const args = useParentHeartbeatSupervisor ? ["--input-type=module", "-e", AGENT_HEARTBEAT_SUPERVISOR_SOURCE] : input.agent.args;
+  const env = useParentHeartbeatSupervisor
+    ? {
+        ...mergedEnv,
+        SUBAGENT_MCP_SUPERVISED_AGENT: JSON.stringify({
+          command: input.agent.command,
+          args: input.agent.args,
+        }),
+      }
+    : mergedEnv;
+
+  return spawn(command, args, {
     cwd: input.cwd,
-    env: mergedEnv,
+    env,
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
 }
+
+const AGENT_HEARTBEAT_SUPERVISOR_SOURCE = String.raw`
+import { createInterface } from "node:readline";
+import { spawn, execFile } from "node:child_process";
+
+const HEARTBEAT_METHOD = "$/subagent_mcp/heartbeat";
+const spec = JSON.parse(process.env.SUBAGENT_MCP_SUPERVISED_AGENT ?? "{}");
+const heartbeatTimeoutMs = Number.parseInt(process.env.SUBAGENT_MCP_PARENT_HEARTBEAT_TIMEOUT_MS ?? "3000", 10);
+const checkIntervalMs = Math.max(250, Math.min(1000, Math.floor(heartbeatTimeoutMs / 3)));
+let lastSeenHeartbeatMs = Date.now();
+let shuttingDown = false;
+
+if (!spec.command || !Array.isArray(spec.args) || !Number.isFinite(heartbeatTimeoutMs) || heartbeatTimeoutMs <= 0) {
+  process.stderr.write("SUBAGENT_MCP heartbeat supervisor missing command, args, or heartbeat settings\n");
+  process.exit(64);
+}
+
+const childEnv = { ...process.env };
+delete childEnv.SUBAGENT_MCP_SUPERVISED_AGENT;
+
+const child = spawn(spec.command, spec.args, {
+  cwd: process.cwd(),
+  env: childEnv,
+  stdio: ["pipe", "pipe", "pipe"],
+  detached: process.platform !== "win32",
+});
+
+child.stdout.pipe(process.stdout);
+child.stderr.pipe(process.stderr);
+child.stdin.on("error", () => undefined);
+process.stdin.on("error", () => undefined);
+process.stdout.on("error", () => undefined);
+process.stderr.on("error", () => undefined);
+
+const parentLines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+parentLines.on("line", (line) => handleParentLine(line));
+parentLines.on("close", () => {
+  if (!shuttingDown) {
+    try {
+      child.stdin.end();
+    } catch {
+      // Parent stdio closed while child was already gone.
+    }
+  }
+});
+
+child.once("exit", (code, signal) => {
+  clearInterval(heartbeatTimer);
+  if (shuttingDown) {
+    process.exit(0);
+  }
+  if (signal) {
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code ?? 0);
+});
+
+process.once("SIGTERM", () => shutdown("SIGTERM", 0));
+process.once("SIGINT", () => shutdown("SIGINT", 0));
+process.once("SIGHUP", () => shutdown("SIGHUP", 0));
+
+const heartbeatTimer = setInterval(() => {
+  checkParentHeartbeat();
+}, checkIntervalMs);
+checkParentHeartbeat();
+
+function handleParentLine(line) {
+  if (shuttingDown) {
+    return;
+  }
+
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  let message;
+  try {
+    message = JSON.parse(trimmed);
+  } catch {
+    forwardToChild(line);
+    return;
+  }
+
+  if (message && typeof message === "object" && message.method === HEARTBEAT_METHOD) {
+    lastSeenHeartbeatMs = Date.now();
+    if (message.id !== undefined) {
+      writeParentMessage({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          ok: true,
+          pid: process.pid,
+          childPid: child.pid,
+          timestamp_ms: Date.now(),
+        },
+      });
+    }
+    return;
+  }
+
+  forwardToChild(line);
+}
+
+function forwardToChild(line) {
+  if (child.stdin.destroyed || child.stdin.writableEnded) {
+    return;
+  }
+  child.stdin.write(line + "\n");
+}
+
+function writeParentMessage(message) {
+  process.stdout.write(JSON.stringify(message) + "\n");
+}
+
+function checkParentHeartbeat() {
+  if (Date.now() - lastSeenHeartbeatMs > heartbeatTimeoutMs) {
+    process.stderr.write("SUBAGENT_MCP parent heartbeat lost; shutting down supervised agent\n");
+    shutdown("SIGTERM", 70);
+  }
+}
+
+function shutdown(signal, exitCode) {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  clearInterval(heartbeatTimer);
+  parentLines.close();
+  signalChildTree(signal);
+  setTimeout(() => {
+    signalChildTree("SIGKILL");
+    exitAfterChildIsReaped(exitCode);
+  }, 1500).unref();
+}
+
+function exitAfterChildIsReaped(exitCode) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    process.exit(exitCode);
+    return;
+  }
+
+  const forceExitTimer = setTimeout(() => {
+    process.exit(exitCode);
+  }, 1000);
+  child.once("exit", () => {
+    clearTimeout(forceExitTimer);
+    process.exit(exitCode);
+  });
+}
+
+function signalChildTree(signal) {
+  if (!child.pid) {
+    return;
+  }
+  if (process.platform === "win32") {
+    const args = ["/PID", String(child.pid), "/T"];
+    if (signal === "SIGKILL") {
+      args.push("/F");
+    }
+    execFile("taskkill", args, () => undefined);
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      process.kill(child.pid, signal);
+    } catch {
+      // Already gone.
+    }
+  }
+}
+`;
 
 /**
  * 尝试温和终止子代理进程树。

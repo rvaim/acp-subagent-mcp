@@ -3,8 +3,9 @@ import path from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { AgentConfig, ServerConfig } from "../config/types.js";
 import type { RunLogPaths } from "../runtime/logs.js";
+import { startParentHeartbeatPinger, SUBAGENT_HEARTBEAT_METHOD } from "../runtime/heartbeat.js";
 import { spawnAcpAgent, terminateThenKill } from "../runtime/processManager.js";
-import { decidePermission } from "../runtime/permissions.js";
+import { decidePermission, resolvePermissionPolicy } from "../runtime/permissions.js";
 import { normalizeMcpServersForAcp } from "../runtime/security.js";
 import { JsonRpcStdioTransport } from "./JsonRpcStdioTransport.js";
 import { AcpEventAggregator } from "./eventAggregator.js";
@@ -34,6 +35,9 @@ export interface GenericAcpClientInput {
 
   /** 有意义进展回调。 */
   onActivity: () => void;
+
+  /** 主代理心跳失联超时时间，单位毫秒。 */
+  parentHeartbeatTimeoutMs: number;
 }
 
 /**
@@ -85,6 +89,9 @@ export class GenericAcpClient {
   /** initialize 返回的 agent 能力。 */
   private initializeResult: Record<string, unknown> | undefined;
 
+  /** 主代理到子代理的主动心跳定时器。 */
+  private readonly parentHeartbeatTimer: NodeJS.Timeout;
+
   /**
    * 正在执行的关闭流程。
    *
@@ -99,7 +106,14 @@ export class GenericAcpClient {
    * @param input ACP client 创建参数。
    */
   constructor(private readonly input: GenericAcpClientInput) {
-    this.child = spawnAcpAgent({ agent: input.agentConfig, cwd: input.cwd });
+    this.child = spawnAcpAgent({
+      agent: input.agentConfig,
+      cwd: input.cwd,
+      env: {
+        SUBAGENT_MCP_PARENT_HEARTBEAT_TIMEOUT_MS: String(input.parentHeartbeatTimeoutMs),
+        SUBAGENT_MCP_PARENT_PID: String(process.pid),
+      },
+    });
     this.onHeartbeatCallback = input.onHeartbeat;
     this.onActivityCallback = input.onActivity;
     this.transport = new JsonRpcStdioTransport(
@@ -111,6 +125,17 @@ export class GenericAcpClient {
       () => this.onHeartbeatCallback(),
     );
     this.transport.start();
+    this.parentHeartbeatTimer = startParentHeartbeatPinger({
+      heartbeatTimeoutMs: input.parentHeartbeatTimeoutMs,
+      sendHeartbeat: async () => {
+        await this.transport.sendRequest(
+          SUBAGENT_HEARTBEAT_METHOD,
+          { parentPid: process.pid, timestamp_ms: Date.now() },
+          heartbeatRequestTimeoutMs(input.parentHeartbeatTimeoutMs),
+        );
+        this.onHeartbeatCallback();
+      },
+    });
   }
 
   /**
@@ -124,6 +149,15 @@ export class GenericAcpClient {
   setLifecycleHandlers(handlers: { onHeartbeat: () => void; onActivity: () => void }): void {
     this.onHeartbeatCallback = handlers.onHeartbeat;
     this.onActivityCallback = handlers.onActivity;
+  }
+
+  /**
+   * 切换当前任务日志路径。
+   *
+   * @param logs 新任务的日志路径。
+   */
+  setLogPaths(logs: RunLogPaths): void {
+    this.transport.setLogPaths(logs.eventsPath, logs.stderrPath);
   }
 
   /**
@@ -142,7 +176,7 @@ export class GenericAcpClient {
       clientInfo: {
         name: "@rvaim/acp-subagent-mcp",
         title: "通用 ACP 子代理 MCP Server",
-        version: "0.1.9",
+        version: "0.1.11",
       },
     });
     this.initializeResult = isRecord(result) ? result : {};
@@ -221,6 +255,7 @@ export class GenericAcpClient {
 
     this.shutdownPromise = (async (): Promise<void> => {
       try {
+        clearInterval(this.parentHeartbeatTimer);
         this.transport.close();
       } catch {
         // transport 可能已经因为子进程退出而关闭，继续执行进程树兜底终止。
@@ -273,7 +308,7 @@ export class GenericAcpClient {
    * @returns 文件内容响应。
    */
   private async handleReadTextFile(params: unknown): Promise<unknown> {
-    const policy = this.input.serverConfig.permissions[this.input.agentType] ?? this.input.serverConfig.permissions.default ?? { read: "deny", search: "deny", edit: "deny", execute: "deny", network: "deny" };
+    const policy = resolvePermissionPolicy(this.input.agentType, this.input.serverConfig);
     if (policy.read !== "allow") {
       throw new Error("权限策略拒绝读取文件");
     }
@@ -292,7 +327,7 @@ export class GenericAcpClient {
    * @returns 写入响应。
    */
   private async handleWriteTextFile(params: unknown): Promise<unknown> {
-    const policy = this.input.serverConfig.permissions[this.input.agentType] ?? this.input.serverConfig.permissions.default ?? { read: "deny", search: "deny", edit: "deny", execute: "deny", network: "deny" };
+    const policy = resolvePermissionPolicy(this.input.agentType, this.input.serverConfig);
     if (policy.edit !== "allow") {
       throw new Error("权限策略拒绝写入文件");
     }
@@ -325,6 +360,16 @@ export class GenericAcpClient {
     }
     return absolutePath;
   }
+}
+
+/**
+ * 计算单次心跳请求等待回复的超时时间。
+ *
+ * @param heartbeatTimeoutMs 子代理主心跳超时。
+ * @returns 单次 request 超时。
+ */
+function heartbeatRequestTimeoutMs(heartbeatTimeoutMs: number): number {
+  return Math.max(250, Math.min(1000, Math.floor(heartbeatTimeoutMs / 2)));
 }
 
 /**

@@ -37,7 +37,7 @@ export interface DefaultsConfig {
   /** 默认无有效输出超时时间，单位为秒。 */
   inactivity_timeout_secs: number;
 
-  /** 默认心跳超时时间，单位为秒。 */
+  /** 默认主代理心跳失联自关闭时间，单位为秒。 */
   heartbeat_timeout_secs: number;
 
   /** 默认最大递归代理深度。 */
@@ -157,7 +157,7 @@ export interface AgentConfig {
   /** 子代理专属环境变量，日志中必须脱敏。 */
   env?: Record<string, string>;
 
-  /** 子代理专属心跳超时，单位为秒。 */
+  /** 子代理专属主代理心跳失联自关闭时间，单位为秒。 */
   heartbeat_timeout_secs?: number;
 
   /** 子代理专属任务超时，单位为秒。 */

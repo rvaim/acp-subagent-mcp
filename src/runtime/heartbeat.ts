@@ -1,35 +1,71 @@
 /**
- * 心跳监控输入参数。
+ * 主代理发送给子代理包装器的 JSON-RPC 心跳方法名。
+ *
+ * 真实 ACP agent 不需要实现这个方法；由本项目启动的监督包装器会拦截该方法并立即响应。
  */
-export interface HeartbeatWatchdogInput {
-  /** 返回最近一次心跳时间戳，单位毫秒。 */
-  getLastHeartbeatMs: () => number;
+export const SUBAGENT_HEARTBEAT_METHOD = "$/subagent_mcp/heartbeat";
 
-  /** 心跳超时时间，单位毫秒。 */
+/**
+ * 主代理心跳发送器输入参数。
+ */
+export interface ParentHeartbeatPingerInput {
+  /** 子代理判定主代理失联的超时时间，单位毫秒。 */
   heartbeatTimeoutMs: number;
 
-  /** 触发心跳超时后的回调。 */
-  onTimeout: () => void;
+  /** 实际发送一次心跳并等待子代理回复。 */
+  sendHeartbeat: () => Promise<void>;
 }
 
 /**
- * 启动子代理心跳监控。
+ * 启动主代理到子代理的主动心跳。
  *
- * 如果超过 heartbeatTimeoutMs 没有收到任何可证明子代理存活的信号，
- * 则触发 onTimeout。调用者负责取消 ACP turn 和终止进程。
+ * MCP Server 会定期向子代理监督包装器发送 JSON-RPC 心跳请求；包装器收到后立即响应。
+ * 成功收到响应表示子代理进程仍可通过 stdio 通信。若主代理停止发送心跳，包装器会在
+ * heartbeatTimeoutMs 内主动关闭自身和真实 ACP agent。
  *
- * @param input 心跳监控参数。
+ * @param input 心跳发送参数。
  * @returns Node 定时器对象。
  */
-export function startHeartbeatWatchdog(input: HeartbeatWatchdogInput): NodeJS.Timeout {
-  const intervalMs = Math.max(250, Math.min(1000, input.heartbeatTimeoutMs));
+export function startParentHeartbeatPinger(input: ParentHeartbeatPingerInput): NodeJS.Timeout {
+  const intervalMs = heartbeatIntervalMs(input.heartbeatTimeoutMs);
+  let inFlight = false;
+
+  const ping = (): void => {
+    if (inFlight) {
+      return;
+    }
+    inFlight = true;
+    void input
+      .sendHeartbeat()
+      .catch(() => undefined)
+      .finally(() => {
+        inFlight = false;
+      });
+  };
+
+  ping();
+  return setInterval(ping, intervalMs);
+}
+
+/**
+ * 启动心跳回复监控。
+ *
+ * @param getLastHeartbeatMs 返回最近一次收到子代理心跳回复或协议消息的时间戳。
+ * @param heartbeatTimeoutMs 心跳失联超时时间，单位毫秒。
+ * @param onTimeout 超时回调。
+ * @returns Node 定时器对象。
+ */
+export function startHeartbeatWatchdog(
+  getLastHeartbeatMs: () => number,
+  heartbeatTimeoutMs: number,
+  onTimeout: () => void,
+): NodeJS.Timeout {
   return setInterval(() => {
     const now = Date.now();
-    const elapsed = now - input.getLastHeartbeatMs();
-    if (elapsed > input.heartbeatTimeoutMs) {
-      input.onTimeout();
+    if (now - getLastHeartbeatMs() > heartbeatTimeoutMs) {
+      onTimeout();
     }
-  }, intervalMs);
+  }, heartbeatIntervalMs(heartbeatTimeoutMs));
 }
 
 /**
@@ -52,4 +88,14 @@ export function startInactivityWatchdog(
       onTimeout();
     }
   }, intervalMs);
+}
+
+/**
+ * 根据心跳超时计算发送和检测间隔。
+ *
+ * @param heartbeatTimeoutMs 心跳超时时间。
+ * @returns 定时器间隔。
+ */
+function heartbeatIntervalMs(heartbeatTimeoutMs: number): number {
+  return Math.max(250, Math.min(1000, Math.floor(heartbeatTimeoutMs / 3)));
 }

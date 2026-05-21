@@ -34,6 +34,7 @@ import {
 import { startHeartbeatWatchdog, startInactivityWatchdog } from "./heartbeat.js";
 import { TaskRegistry, isTerminalStatus, type ActiveSubagentRun } from "./taskRegistry.js";
 import { fingerprint, SessionPool, type PooledSubagentSession } from "./sessionPool.js";
+import { resolvePermissionPolicy } from "./permissions.js";
 
 /**
  * 子代理运行时。
@@ -429,10 +430,11 @@ export class SubagentRuntime {
 
     const parentAgentId = input.parent_agent_id ?? input.task.parent_context?.parent_agent ?? "default";
     const detailLevel = input.detail_level ?? this.config.defaults.default_detail_level;
+    const mode = input.mode ?? "analyze";
     const logs = await createRunLogs(path.resolve(this.config.defaults.log_dir));
-    const poolPreview = this.findPoolPreview(input, cwd, parentAgentId);
+    const poolPreview = this.findPoolPreview(input, cwd, parentAgentId, mode);
     const prompt = renderSubagentPrompt({
-      mode: input.mode,
+      mode,
       task: input.task,
       systemPrompt: agent.system_prompt,
       conversationSummary: poolPreview?.conversationSummary,
@@ -448,7 +450,7 @@ export class SubagentRuntime {
     const run = this.registry.create({
       agentType: input.agent_type,
       cwd,
-      mode: input.mode,
+      mode,
       parentAgentId,
       logs,
       detailLevel,
@@ -456,7 +458,7 @@ export class SubagentRuntime {
       allowPoolRelease: options.allowPoolRelease,
     });
 
-    this.concurrencyGuard.acquire(run.taskId, cwd, input.task, input.mode, options.conflictPolicy);
+    this.concurrencyGuard.acquire(run.taskId, cwd, input.task, mode, options.conflictPolicy);
     run.completion = this.executeInitialRun(run, input, prompt).finally(() => {
       this.concurrencyGuard.release(run.taskId);
     });
@@ -489,7 +491,7 @@ export class SubagentRuntime {
 
     return await this.withTimeouts(run, { timeoutSecs, inactivityTimeoutSecs, heartbeatTimeoutSecs }, async () => {
       const poolPolicy = input.session_pool_policy ?? this.config.session_pool.reuse_policy;
-      const permissionPolicyFingerprint = fingerprint(this.config.permissions[run.agentType] ?? this.config.permissions.default);
+      const permissionPolicyFingerprint = this.permissionPolicyFingerprint(run.agentType);
       let pooled: PooledSubagentSession | undefined;
 
       if (poolPolicy === "auto") {
@@ -509,6 +511,7 @@ export class SubagentRuntime {
           onHeartbeat: () => this.registry.touchHeartbeat(run),
           onActivity: () => this.registry.touchActivity(run),
         });
+        run.client.setLogPaths(run.logs);
         run.sessionId = pooled.sessionId;
         run.processId = pooled.processId;
         run.reusedSession = true;
@@ -520,6 +523,7 @@ export class SubagentRuntime {
           serverConfig: this.config,
           cwd: run.cwd ?? process.cwd(),
           logs: run.logs,
+          parentHeartbeatTimeoutMs: heartbeatTimeoutSecs * 1000,
           onHeartbeat: () => this.registry.touchHeartbeat(run),
           onActivity: () => this.registry.touchActivity(run),
         });
@@ -650,19 +654,19 @@ export class SubagentRuntime {
       fail("TIMEOUT", "子代理任务超过 wall-clock timeout，已终止");
     }, timeouts.timeoutSecs * 1000);
 
-    const heartbeatTimer = startHeartbeatWatchdog({
-      getLastHeartbeatMs: () => run.lastHeartbeatAt?.getTime() ?? run.startedAt?.getTime() ?? Date.now(),
-      heartbeatTimeoutMs: timeouts.heartbeatTimeoutSecs * 1000,
-      onTimeout: () => {
-        fail("HEARTBEAT_TIMEOUT", `子代理超过 ${timeouts.heartbeatTimeoutSecs} 秒无心跳，已终止`);
-      },
-    });
-
     const inactivityTimer = startInactivityWatchdog(
       () => run.lastActivityAt?.getTime() ?? run.startedAt?.getTime() ?? Date.now(),
       timeouts.inactivityTimeoutSecs * 1000,
       () => {
         fail("INACTIVITY_TIMEOUT", `子代理超过 ${timeouts.inactivityTimeoutSecs} 秒无有效进展，已终止`);
+      },
+    );
+
+    const heartbeatTimer = startHeartbeatWatchdog(
+      () => run.lastHeartbeatAt?.getTime() ?? run.startedAt?.getTime() ?? Date.now(),
+      timeouts.heartbeatTimeoutSecs * 1000,
+      () => {
+        fail("HEARTBEAT_TIMEOUT", `子代理超过 ${timeouts.heartbeatTimeoutSecs} 秒没有回复主代理心跳，已终止`);
       },
     );
 
@@ -690,8 +694,8 @@ export class SubagentRuntime {
       settled = true;
       run.cancelController.signal.removeEventListener("abort", cancelFromAbortSignal);
       clearTimeout(wallTimer);
-      clearInterval(heartbeatTimer);
       clearInterval(inactivityTimer);
+      clearInterval(heartbeatTimer);
     }
   }
 
@@ -712,7 +716,7 @@ export class SubagentRuntime {
     }
 
     if (run.allowPoolRelease) {
-      const permissionPolicyFingerprint = fingerprint(this.config.permissions[run.agentType] ?? this.config.permissions.default);
+      const permissionPolicyFingerprint = this.permissionPolicyFingerprint(run.agentType);
       const released = this.sessionPool.release({
         parentAgentId: run.parentAgentId,
         agentType: run.agentType,
@@ -854,8 +858,35 @@ export class SubagentRuntime {
    * @param parentAgentId 父代理 ID。
    * @returns 命中的池化 session；不会从池中移除。
    */
-  private findPoolPreview(_input: SubagentRunInput, _cwd: string, _parentAgentId: string): PooledSubagentSession | undefined {
-    return undefined;
+  private findPoolPreview(
+    input: SubagentRunInput,
+    cwd: string,
+    parentAgentId: string,
+    mode: string,
+  ): PooledSubagentSession | undefined {
+    const poolPolicy = input.session_pool_policy ?? this.config.session_pool.reuse_policy;
+    if (poolPolicy !== "auto") {
+      return undefined;
+    }
+
+    return this.sessionPool.peek({
+      parentAgentId,
+      agentType: input.agent_type,
+      cwd,
+      mode,
+      mcpServers: input.mcp_servers,
+      permissionPolicyFingerprint: this.permissionPolicyFingerprint(input.agent_type),
+    });
+  }
+
+  /**
+   * 计算合并后的权限策略签名。
+   *
+   * @param agentType 子代理类型。
+   * @returns 权限策略签名。
+   */
+  private permissionPolicyFingerprint(agentType: string): string {
+    return fingerprint(resolvePermissionPolicy(agentType, this.config));
   }
 
   /**

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { execFileSync, spawn } from "node:child_process";
+import { spawnAcpAgent } from "../dist/runtime/processManager.js";
 
 /** 项目根目录。 */
 const projectRoot = process.cwd();
@@ -19,13 +20,18 @@ const configPath = path.join(tempDir, "agents.toml");
 /** 孙进程 PID 文件路径。 */
 const pidFile = path.join(tempDir, "grandchild.pid");
 
+/** 被心跳包装器监督的进程 PID 文件路径。 */
+const supervisedPidFile = path.join(tempDir, "supervised.pid");
+
+
 fs.rmSync(tempDir, { recursive: true, force: true });
 fs.mkdirSync(tempDir, { recursive: true });
 fs.writeFileSync(configPath, renderConfig(), "utf8");
 
 await testMcpCancellationKillsProcessTree();
-await testHeartbeatTimeoutKillsProcessTree();
-console.log("取消与心跳进程树清理测试通过");
+await testInactivityTimeoutKillsProcessTree();
+await testParentHeartbeatLossKillsSupervisedAgent();
+console.log("取消、无进展超时与父心跳监督测试通过");
 
 /**
  * 测试 MCP notifications/cancelled 能否杀掉忽略 SIGTERM 的孙进程。
@@ -68,13 +74,13 @@ async function testMcpCancellationKillsProcessTree() {
 }
 
 /**
- * 测试 heartbeat timeout 能否杀掉忽略 SIGTERM 的孙进程。
+ * 测试 inactivity timeout 能否杀掉忽略 SIGTERM 的孙进程。
  */
-async function testHeartbeatTimeoutKillsProcessTree() {
+async function testInactivityTimeoutKillsProcessTree() {
   fs.rmSync(pidFile, { force: true });
   const client = startMcpServer();
   try {
-    await initializeMcp(client, "heartbeat-test");
+    await initializeMcp(client, "inactivity-test");
     client.send({
       jsonrpc: "2.0",
       id: 2,
@@ -85,10 +91,10 @@ async function testHeartbeatTimeoutKillsProcessTree() {
           agent_type: "hang",
           cwd: projectRoot,
           timeout_secs: 30,
-          heartbeat_timeout_secs: 1,
-          inactivity_timeout_secs: 120,
+          heartbeat_timeout_secs: 30,
+          inactivity_timeout_secs: 1,
           session_pool_policy: "disable",
-          task: { title: "心跳测试", goal: "启动后保持沉默，等待心跳超时" },
+          task: { title: "无进展超时测试", goal: "启动后保持沉默，等待无进展超时" },
         },
       },
     });
@@ -96,14 +102,49 @@ async function testHeartbeatTimeoutKillsProcessTree() {
     const grandchildPid = Number(await waitForFile(pidFile));
     const response = await client.waitForResponse(2, 10000);
     const text = String(response.result?.content?.[0]?.text ?? "");
-    if (!text.includes("heartbeat_timeout")) {
-      throw new Error(`没有收到 heartbeat_timeout 结果：${text.slice(0, 300)}`);
+    if (!text.includes("INACTIVITY_TIMEOUT")) {
+      throw new Error(`没有收到 INACTIVITY_TIMEOUT 结果：${text.slice(0, 300)}`);
     }
 
     await sleep(1000);
-    assertProcessDead(grandchildPid, "心跳超时后孙进程仍然存活");
+    assertProcessDead(grandchildPid, "无进展超时后孙进程仍然存活");
   } finally {
     await client.stop();
+  }
+}
+
+/**
+ * 测试子代理包装器能在主代理心跳停止时主动关闭自身和真实 agent。
+ */
+async function testParentHeartbeatLossKillsSupervisedAgent() {
+  fs.rmSync(supervisedPidFile, { force: true });
+  const child = spawnAcpAgent({
+    agent: {
+      description: "父心跳监督测试 agent",
+      command: process.execPath,
+      args: [
+        "-e",
+        "const fs=require('fs'); fs.writeFileSync(process.env.PID_FILE,String(process.pid)); process.on('SIGTERM',()=>{}); setInterval(()=>{},1000);",
+      ],
+      capabilities: ["test"],
+      env: { PID_FILE: supervisedPidFile },
+    },
+    cwd: projectRoot,
+    env: {
+      SUBAGENT_MCP_PARENT_HEARTBEAT_TIMEOUT_MS: "500",
+    },
+  });
+
+  try {
+    const supervisedPid = Number(await waitForFile(supervisedPidFile));
+    const exited = await waitForExit(child, 5000);
+    if (!exited) {
+      throw new Error("父心跳失联后包装器没有退出");
+    }
+    await sleep(500);
+    assertProcessDead(supervisedPid, "父心跳失联后真实 agent 仍然存活");
+  } finally {
+    child.kill("SIGKILL");
   }
 }
 
@@ -208,6 +249,30 @@ function assertProcessDead(pid, message) {
 }
 
 /**
+ * 等待子进程退出。
+ *
+ * @param child 子进程。
+ * @param timeoutMs 等待超时毫秒。
+ * @returns 退出返回 true，超时返回 false。
+ */
+async function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return true;
+  }
+  return await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once("exit", onExit);
+  });
+}
+
+/**
  * 判断进程是否存在。
  *
  * @param pid 进程 PID。
@@ -291,9 +356,9 @@ reuse_policy = "disable"
 [permissions.default]
 read = "allow"
 search = "allow"
-edit = "deny"
-execute = "deny"
-network = "deny"
+edit = "allow"
+execute = "allow"
+network = "allow"
 
 [agents.hang]
 description = "取消与心跳测试用挂起 ACP agent。"

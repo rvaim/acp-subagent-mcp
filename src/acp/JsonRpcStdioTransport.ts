@@ -59,8 +59,8 @@ export class JsonRpcStdioTransport extends EventEmitter {
    */
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
-    private readonly eventsLogPath: string,
-    private readonly stderrLogPath: string,
+    private eventsLogPath: string,
+    private stderrLogPath: string,
     private readonly onNotification: AcpNotificationHandler,
     private readonly onClientRequest: AcpClientRequestHandler,
     private readonly onHeartbeat: HeartbeatHandler,
@@ -111,6 +111,20 @@ export class JsonRpcStdioTransport extends EventEmitter {
       this.pendingRequests.clear();
       this.emit("error", error);
     });
+  }
+
+
+  /**
+   * 切换当前写入的日志路径。
+   *
+   * 池化复用同一个 ACP client 时，每个新任务仍应写入自己的 events/stderr 日志。
+   *
+   * @param eventsLogPath 新的 events 日志路径。
+   * @param stderrLogPath 新的 stderr 日志路径。
+   */
+  setLogPaths(eventsLogPath: string, stderrLogPath: string): void {
+    this.eventsLogPath = eventsLogPath;
+    this.stderrLogPath = stderrLogPath;
   }
 
   /**

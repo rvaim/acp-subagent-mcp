@@ -113,32 +113,24 @@ export class SessionPool {
    * @returns 池化 session；未命中时返回 undefined。
    */
   acquire(input: AcquireSessionInput): PooledSubagentSession | undefined {
-    if (!this.config.session_pool.enabled) {
+    const entry = this.findCompatible(input);
+    if (!entry) {
       return undefined;
     }
 
-    this.removeExpired();
-    const mcpFingerprint = fingerprint(input.mcpServers ?? {});
+    entry.idle = false;
+    entry.lastUsedAt = new Date();
+    return entry;
+  }
 
-    for (const entry of this.entries.values()) {
-      const compatible =
-        entry.idle &&
-        entry.parentAgentId === input.parentAgentId &&
-        entry.agentType === input.agentType &&
-        entry.cwd === input.cwd &&
-        entry.mode === input.mode &&
-        entry.mcpServersFingerprint === mcpFingerprint &&
-        entry.permissionPolicyFingerprint === input.permissionPolicyFingerprint &&
-        (entry.contextUsageRatio ?? 0) < this.config.session_pool.max_context_usage_ratio;
-
-      if (compatible) {
-        entry.idle = false;
-        entry.lastUsedAt = new Date();
-        return entry;
-      }
-    }
-
-    return undefined;
+  /**
+   * 查看一个兼容且空闲的 session，但不占用它。
+   *
+   * @param input 查找输入。
+   * @returns 池化 session；未命中时返回 undefined。
+   */
+  peek(input: AcquireSessionInput): PooledSubagentSession | undefined {
+    return this.findCompatible(input);
   }
 
   /**
@@ -209,6 +201,39 @@ export class SessionPool {
     const clients = Array.from(this.entries.values()).map((entry) => entry.client);
     this.entries.clear();
     await Promise.allSettled(clients.map((client) => client.shutdown()));
+  }
+
+  /**
+   * 查找兼容且空闲的 session。
+   *
+   * @param input 查找输入。
+   * @returns 命中的池化 session；未命中时返回 undefined。
+   */
+  private findCompatible(input: AcquireSessionInput): PooledSubagentSession | undefined {
+    if (!this.config.session_pool.enabled) {
+      return undefined;
+    }
+
+    this.removeExpired();
+    const mcpFingerprint = fingerprint(input.mcpServers ?? {});
+
+    for (const entry of this.entries.values()) {
+      const compatible =
+        entry.idle &&
+        entry.parentAgentId === input.parentAgentId &&
+        entry.agentType === input.agentType &&
+        entry.cwd === input.cwd &&
+        entry.mode === input.mode &&
+        entry.mcpServersFingerprint === mcpFingerprint &&
+        entry.permissionPolicyFingerprint === input.permissionPolicyFingerprint &&
+        (entry.contextUsageRatio ?? 0) < this.config.session_pool.max_context_usage_ratio;
+
+      if (compatible) {
+        return entry;
+      }
+    }
+
+    return undefined;
   }
 
   /**

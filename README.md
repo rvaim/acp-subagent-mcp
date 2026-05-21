@@ -29,7 +29,7 @@
 - 子代理 JSON 或自然语言结果解析
 - wall-clock timeout
 - inactivity timeout
-- 默认 60 秒 heartbeat timeout
+- 默认 3 秒主动心跳：MCP Server 通过 JSON-RPC 向子代理包装器发送心跳，包装器回复后证明子代理仍可通信；3 秒内收不到主代理心跳会主动关闭自身
 - 取消与进程树清理
 - 日志目录：`task.json`、`rendered_prompt.md`、`events.jsonl`、`stderr.log`、`result.json`
 - cwd 与文件路径安全校验
@@ -163,7 +163,7 @@ description = "Codex"
 | `SUBAGENT_MCP_DEFAULT_AGENT_ENV` | `{}` | 传给默认 agent 的 JSON 字符串对象 |
 | `SUBAGENT_MCP_TIMEOUT_SECS` | `600` | 默认任务超时 |
 | `SUBAGENT_MCP_INACTIVITY_TIMEOUT_SECS` | `120` | 默认无进展超时 |
-| `SUBAGENT_MCP_HEARTBEAT_TIMEOUT_SECS` | `60` | 默认心跳超时 |
+| `SUBAGENT_MCP_HEARTBEAT_TIMEOUT_SECS` | `60` | 默认父心跳失联自关闭窗口 |
 | `SUBAGENT_MCP_ALLOWED_CWD_ROOTS` | 当前工作目录 | JSON 字符串数组或逗号分隔路径 |
 | `SUBAGENT_MCP_ALLOW_NETWORK` | `false` | 是否允许联网，支持 `true` / `false` |
 | `SUBAGENT_MCP_MAX_PARALLEL_TASKS` | `4` | 最大并行任务数 |

@@ -11,20 +11,20 @@ import type {
   SessionPoolConfig,
 } from "./types.js";
 
-/** 默认权限策略：只允许读和搜索，拒绝写、执行和联网。 */
+/** 默认权限策略：默认允许子代理发起读、搜、写、执行和联网权限请求。 */
 const DEFAULT_PERMISSION_POLICY: PermissionPolicy = {
   read: "allow",
   search: "allow",
-  edit: "deny",
-  execute: "deny",
-  network: "deny",
+  edit: "allow",
+  execute: "allow",
+  network: "allow",
 };
 
 /** 默认运行参数。 */
 const DEFAULT_DEFAULTS: DefaultsConfig = {
   timeout_secs: 600,
   inactivity_timeout_secs: 120,
-  heartbeat_timeout_secs: 60,
+  heartbeat_timeout_secs: 3,
   max_depth: 2,
   max_prompt_chars: 120000,
   max_inline_file_chars: 30000,
@@ -250,7 +250,7 @@ function applyEnvironmentOverrides(config: ServerConfig): ServerConfig {
  * 判断 Node.js 系统错误码。
  */
 function isNodeErrorCode(error: unknown, code: string): boolean {
-  return Boolean(error) && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === code;
+  return error !== null && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === code;
 }
 
 function envOptionalString(name: string): string | undefined {

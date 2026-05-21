@@ -35,7 +35,7 @@ export interface CreatedServer {
 export function createServer(config: ServerConfig): CreatedServer {
   const runtime = new SubagentRuntime(config);
   const server = new McpServer(
-    { name: "@rvaim/acp-subagent-mcp", version: "0.1.9" },
+    { name: "@rvaim/acp-subagent-mcp", version: "0.1.11" },
     {
       instructions:
         "这是一个通用 ACP 子代理编排 MCP Server。优先使用 subagent_list 查看可用子代理；短任务使用 subagent_run；需要并行、多轮或取消时使用 subagent_start/subagent_wait/subagent_continue/subagent_cancel/subagent_close。",
